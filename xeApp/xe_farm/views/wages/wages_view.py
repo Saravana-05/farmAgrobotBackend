@@ -1,0 +1,502 @@
+from rest_framework import status
+from rest_framework.decorators import api_view
+from rest_framework.response import Response
+from django.core.paginator import Paginator
+from django.db.models import Q
+from django.shortcuts import get_object_or_404
+from datetime import date, datetime
+from django.utils import timezone
+from ...models import Wage
+from ...serializers import WageSerializer
+
+@api_view(['POST'])
+def save_wage_data(request):
+    """
+    Save wage data for an employee
+    """
+    try:
+        # Check if request has any data
+        if not request.data:
+            return Response({
+                'status': 'error',
+                'message': 'No data received in request'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Debug logging
+        print(f"Request data: {request.data}")
+        
+        # Validate the wage data
+        serializer = WageSerializer(data=request.data)
+        
+        if not serializer.is_valid():
+            return Response({
+                'status': 'error',
+                'message': 'Validation failed',
+                'errors': serializer.errors
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        validated_data = serializer.validated_data
+        
+        # Check if employee exists and is active
+        employee = validated_data.get('employee')
+        if not employee.status:
+            return Response({
+                'status': 'error',
+                'message': 'Cannot add wage for inactive employee'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Create wage record
+        wage = Wage.objects.create(**validated_data)
+        
+        # Return success response
+        response_serializer = WageSerializer(wage)
+        return Response({
+            'status': 'success',
+            'message': 'Wage data saved successfully',
+            'data': response_serializer.data
+        }, status=status.HTTP_201_CREATED)
+        
+    except Exception as e:
+        print(f"Server error: {e}")
+        return Response({
+            'status': 'error',
+            'message': f'Internal server error: {str(e)}'
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['GET'])
+def get_wage_list(request):
+    """
+    Get list of wages with optional filtering, searching, and pagination
+    
+    Query Parameters:
+    - page: Page number for pagination (default: 1)
+    - limit: Number of items per page (default: 10, max: 100)
+    - search: Search term to filter by employee name or contact
+    - employee_id: Filter by specific employee
+    - current_only: Show only current wages (true/false)
+    - min_amount: Filter by minimum wage amount
+    - max_amount: Filter by maximum wage amount
+    - from_date: Filter wages effective from this date
+    - to_date: Filter wages effective to this date
+    """
+    try:
+        # Get query parameters
+        page = int(request.GET.get('page', 1))
+        limit = min(int(request.GET.get('limit', 10)), 100)
+        search = request.GET.get('search', '').strip()
+        employee_id = request.GET.get('employee_id', '').strip()
+        current_only = request.GET.get('current_only', '').strip().lower() == 'true'
+        
+        # Start with all wages
+        wages = Wage.objects.select_related('employee').all()
+        
+        # Apply search filter
+        if search:
+            wages = wages.filter(
+                Q(employee__name__icontains=search) |
+                Q(employee__tamil_name__icontains=search) |
+                Q(employee__contact__icontains=search) |
+                Q(notes__icontains=search)
+            )
+        
+        # Apply employee filter
+        if employee_id and employee_id.isdigit():
+            wages = wages.filter(employee_id=int(employee_id))
+        
+        # Apply current wages filter
+        if current_only:
+            today = date.today()
+            wages = wages.filter(
+                effective_from__lte=today
+            ).filter(
+                Q(effective_to__isnull=True) | Q(effective_to__gte=today)
+            )
+        
+        # Apply amount filters
+        min_amount = request.GET.get('min_amount', '').strip()
+        if min_amount:
+            try:
+                wages = wages.filter(amount__gte=Decimal(min_amount))
+            except:
+                pass
+        
+        max_amount = request.GET.get('max_amount', '').strip()
+        if max_amount:
+            try:
+                wages = wages.filter(amount__lte=Decimal(max_amount))
+            except:
+                pass
+        
+        # Apply date filters
+        from_date = request.GET.get('from_date', '').strip()
+        if from_date:
+            try:
+                from_date_obj = datetime.strptime(from_date, '%Y-%m-%d').date()
+                wages = wages.filter(effective_from__gte=from_date_obj)
+            except:
+                pass
+        
+        to_date = request.GET.get('to_date', '').strip()
+        if to_date:
+            try:
+                to_date_obj = datetime.strptime(to_date, '%Y-%m-%d').date()
+                wages = wages.filter(
+                    Q(effective_to__lte=to_date_obj) | Q(effective_to__isnull=True)
+                )
+            except:
+                pass
+        
+        # Order by effective date (newest first)
+        wages = wages.order_by('-effective_from', '-created_at')
+        
+        # Apply pagination
+        paginator = Paginator(wages, limit)
+        
+        # Validate page number
+        if page < 1:
+            page = 1
+        elif page > paginator.num_pages and paginator.num_pages > 0:
+            page = paginator.num_pages
+        
+        page_obj = paginator.get_page(page)
+        
+        # Serialize the data
+        serializer = WageSerializer(page_obj.object_list, many=True)
+        
+        return Response({
+            'status': 'success',
+            'message': 'Wages retrieved successfully',
+            'data': {
+                'wages': serializer.data,
+                'pagination': {
+                    'current_page': page,
+                    'total_pages': paginator.num_pages,
+                    'total_count': paginator.count,
+                    'has_next': page_obj.has_next(),
+                    'has_previous': page_obj.has_previous(),
+                    'per_page': limit
+                }
+            }
+        }, status=status.HTTP_200_OK)
+        
+    except ValueError as e:
+        return Response({
+            'status': 'error',
+            'message': 'Invalid parameter values'
+        }, status=status.HTTP_400_BAD_REQUEST)
+        
+    except Exception as e:
+        return Response({
+            'status': 'error',
+            'message': f'Internal server error: {str(e)}'
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['GET'])
+def get_wage_detail(request, wage_id):
+    """
+    Get detailed information for a specific wage by ID
+    """
+    try:
+        # Get wage by ID or return 404
+        wage = get_object_or_404(Wage.objects.select_related('employee'), id=wage_id)
+        
+        # Serialize the wage data
+        serializer = WageSerializer(wage)
+        
+        return Response({
+            'status': 'success',
+            'message': 'Wage details retrieved successfully',
+            'data': serializer.data
+        }, status=status.HTTP_200_OK)
+        
+    except Exception as e:
+        return Response({
+            'status': 'error',
+            'message': f'Internal server error: {str(e)}'
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['GET'])
+def get_employee_wages(request, employee_id):
+    """
+    Get all wages for a specific employee
+    """
+    try:
+        # Get employee or return 404
+        employee = get_object_or_404(Employee, id=employee_id)
+        
+        # Get all wages for this employee
+        wages = Wage.objects.filter(employee=employee).order_by('-effective_from')
+        
+        # Serialize the wage data
+        serializer = WageSerializer(wages, many=True)
+        
+        # Get current wage
+        current_wage = Wage.get_current_wage(employee)
+        current_wage_data = WageSerializer(current_wage).data if current_wage else None
+        
+        return Response({
+            'status': 'success',
+            'message': 'Employee wages retrieved successfully',
+            'data': {
+                'employee_id': employee.id,
+                'employee_name': employee.name,
+                'current_wage': current_wage_data,
+                'wage_history': serializer.data
+            }
+        }, status=status.HTTP_200_OK)
+        
+    except Exception as e:
+        return Response({
+            'status': 'error',
+            'message': f'Internal server error: {str(e)}'
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['GET'])
+def get_wage_statistics(request):
+    """
+    Get wage statistics and summary information
+    """
+    try:
+        from django.db.models import Count, Avg, Min, Max, Sum
+        
+        total_wages = Wage.objects.count()
+        
+        # Get current wages only
+        today = date.today()
+        current_wages = Wage.objects.filter(
+            effective_from__lte=today
+        ).filter(
+            Q(effective_to__isnull=True) | Q(effective_to__gte=today)
+        )
+        
+        total_current_wages = current_wages.count()
+        
+        # Calculate statistics
+        wage_stats = current_wages.aggregate(
+            avg_wage=Avg('amount'),
+            min_wage=Min('amount'),
+            max_wage=Max('amount'),
+            total_wage_expense=Sum('amount')
+        )
+        
+        # Get wage distribution (ranges)
+        wage_ranges = [
+            {'range': '0-10000', 'count': current_wages.filter(amount__lt=10000).count()},
+            {'range': '10000-25000', 'count': current_wages.filter(amount__gte=10000, amount__lt=25000).count()},
+            {'range': '25000-50000', 'count': current_wages.filter(amount__gte=25000, amount__lt=50000).count()},
+            {'range': '50000+', 'count': current_wages.filter(amount__gte=50000).count()},
+        ]
+        
+        # Get recent wage changes (last 30 days)
+        thirty_days_ago = timezone.now().date() - timezone.timedelta(days=30)
+        recent_changes = Wage.objects.filter(created_at__gte=thirty_days_ago).count()
+        
+        return Response({
+            'status': 'success',
+            'message': 'Wage statistics retrieved successfully',
+            'data': {
+                'summary': {
+                    'total_wage_records': total_wages,
+                    'current_active_wages': total_current_wages,
+                    'average_wage': float(wage_stats['avg_wage'] or 0),
+                    'minimum_wage': float(wage_stats['min_wage'] or 0),
+                    'maximum_wage': float(wage_stats['max_wage'] or 0),
+                    'total_monthly_expense': float(wage_stats['total_wage_expense'] or 0),
+                    'recent_changes': recent_changes
+                },
+                'wage_distribution': wage_ranges
+            }
+        }, status=status.HTTP_200_OK)
+        
+    except Exception as e:
+        return Response({
+            'status': 'error',
+            'message': f'Internal server error: {str(e)}'
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['PUT'])
+def edit_wage_data(request, wage_id):
+    """
+    Edit wage data
+    """
+    try:
+        # Get the wage instance
+        try:
+            wage = Wage.objects.select_related('employee').get(id=wage_id)
+        except Wage.DoesNotExist:
+            return Response({
+                'status': 'error',
+                'message': 'Wage record not found'
+            }, status=status.HTTP_404_NOT_FOUND)
+        
+        # Check if request has any data
+        if not request.data:
+            return Response({
+                'status': 'error',
+                'message': 'No data received in request'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Validate the wage data (partial update allowed)
+        serializer = WageSerializer(wage, data=request.data, partial=True)
+        
+        if not serializer.is_valid():
+            return Response({
+                'status': 'error',
+                'message': 'Validation failed',
+                'errors': serializer.errors
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        validated_data = serializer.validated_data
+        
+        # Check if employee is being changed and is active
+        employee = validated_data.get('employee', wage.employee)
+        if not employee.status:
+            return Response({
+                'status': 'error',
+                'message': 'Cannot assign wage to inactive employee'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Update wage record
+        for attr, value in validated_data.items():
+            setattr(wage, attr, value)
+        
+        wage.save()
+        
+        # Return success response
+        response_serializer = WageSerializer(wage)
+        return Response({
+            'status': 'success',
+            'message': 'Wage data updated successfully',
+            'data': response_serializer.data
+        }, status=status.HTTP_200_OK)
+        
+    except Exception as e:
+        return Response({
+            'status': 'error',
+            'message': f'Internal server error: {str(e)}'
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['DELETE'])
+def delete_wage(request, wage_id):
+    """
+    Delete wage record
+    
+    Query Parameters:
+    - hard_delete: true/false (default: true - wages are typically hard deleted)
+    """
+    try:
+        # Get the wage object
+        wage = get_object_or_404(Wage.objects.select_related('employee'), id=wage_id)
+        
+        # Store wage data for response before deletion
+        wage_data = {
+            'wage_id': wage.id,
+            'employee_name': wage.employee.name,
+            'amount': float(wage.amount),
+            'effective_from': wage.effective_from,
+            'effective_to': wage.effective_to
+        }
+        
+        # Check if this is the only current wage for the employee
+        if wage.is_current:
+            current_wages_count = Wage.objects.filter(
+                employee=wage.employee,
+                effective_from__lte=date.today()
+            ).filter(
+                Q(effective_to__isnull=True) | Q(effective_to__gte=date.today())
+            ).count()
+            
+            if current_wages_count == 1:
+                return Response({
+                    'status': 'warning',
+                    'message': 'Cannot delete the only current wage for this employee. Please add a new wage first.',
+                    'data': wage_data
+                }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Delete the wage record
+        wage.delete()
+        
+        return Response({
+            'status': 'success',
+            'message': 'Wage record deleted successfully',
+            'data': wage_data
+        }, status=status.HTTP_200_OK)
+        
+    except Exception as e:
+        return Response({
+            'status': 'error',
+            'message': f'Internal server error: {str(e)}'
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['POST'])
+def end_current_wage(request, wage_id):
+    """
+    End the current wage by setting effective_to date to today or specified date
+    
+    Request Body:
+    {
+        "end_date": "YYYY-MM-DD" (optional, defaults to today)
+    }
+    """
+    try:
+        # Get the wage object
+        wage = get_object_or_404(Wage.objects.select_related('employee'), id=wage_id)
+        
+        # Check if wage is currently active
+        if not wage.is_current:
+            return Response({
+                'status': 'error',
+                'message': 'This wage is not currently active'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Check if wage already has an end date
+        if wage.effective_to:
+            return Response({
+                'status': 'error',
+                'message': 'This wage already has an end date'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Get end date from request or use today
+        end_date = request.data.get('end_date')
+        if end_date:
+            try:
+                end_date = datetime.strptime(end_date, '%Y-%m-%d').date()
+            except ValueError:
+                return Response({
+                    'status': 'error',
+                    'message': 'Invalid end date format. Use YYYY-MM-DD'
+                }, status=status.HTTP_400_BAD_REQUEST)
+        else:
+            end_date = date.today()
+        
+        # Validate end date
+        if end_date < wage.effective_from:
+            return Response({
+                'status': 'error',
+                'message': 'End date cannot be before the effective from date'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Update the wage
+        wage.effective_to = end_date
+        wage.save(update_fields=['effective_to', 'updated_at'])
+        
+        # Return success response
+        response_serializer = WageSerializer(wage)
+        return Response({
+            'status': 'success',
+            'message': 'Wage ended successfully',
+            'data': response_serializer.data
+        }, status=status.HTTP_200_OK)
+        
+    except Exception as e:
+        return Response({
+            'status': 'error',
+            'message': f'Internal server error: {str(e)}'
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

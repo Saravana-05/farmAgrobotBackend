@@ -325,7 +325,7 @@ def get_employee_statistics(request):
 def edit_employee_data(request, employee_id):
     """
     Edit employee data with optional image upload to local Django storage
-    Model fields: name, tamil_name, joining_date, emp_type, gender, wages, 
+    Model fields: name, tamil_name, joining_date, emp_type, gender, 
                  image_url, contact, status, created_at, updated_at
     """
     try:
@@ -664,3 +664,152 @@ def restore_employee(request, employee_id):
             'message': f'Internal server error: {str(e)}'
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
+@api_view(['PATCH'])
+def change_employee_status(request, employee_id):
+    """
+    Change employee status between active and inactive
+    
+    Request Body:
+    {
+        "status": true/false  # true for active, false for inactive
+    }
+    
+    OR
+    
+    {
+        "action": "activate"/"deactivate"  # Alternative format
+    }
+    """
+    try:
+        # Get the employee object
+        employee = get_object_or_404(Employee, id=employee_id)
+        
+        # Check if request has data
+        if not request.data:
+            return Response({
+                'status': 'error',
+                'message': 'No data received in request'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Get the new status from request
+        new_status = None
+        
+        # Check for 'status' field (boolean)
+        if 'status' in request.data:
+            status_value = request.data.get('status')
+            if isinstance(status_value, bool):
+                new_status = status_value
+            elif isinstance(status_value, str):
+                if status_value.lower() in ['true', '1', 'yes', 'active']:
+                    new_status = True
+                elif status_value.lower() in ['false', '0', 'no', 'inactive']:
+                    new_status = False
+        
+        # Check for 'action' field (string)
+        elif 'action' in request.data:
+            action = request.data.get('action', '').lower()
+            if action == 'activate':
+                new_status = True
+            elif action == 'deactivate':
+                new_status = False
+        
+        # Validate status value
+        if new_status is None:
+            return Response({
+                'status': 'error',
+                'message': 'Invalid or missing status. Use "status": true/false or "action": "activate"/"deactivate"'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Check if status is already the same
+        if employee.status == new_status:
+            action_word = 'active' if new_status else 'inactive'
+            return Response({
+                'status': 'warning',
+                'message': f'Employee is already {action_word}',
+                'data': {
+                    'employee_id': employee.id,
+                    'name': employee.name,
+                    'current_status': employee.status
+                }
+            }, status=status.HTTP_200_OK)
+        
+        # Store old status for response
+        old_status = employee.status
+        
+        # Update the status
+        employee.status = new_status
+        employee.save(update_fields=['status', 'updated_at'])
+        
+        # Prepare response message
+        action_performed = 'activated' if new_status else 'deactivated'
+        
+        return Response({
+            'status': 'success',
+            'message': f'Employee {action_performed} successfully',
+            'data': {
+                'employee_id': employee.id,
+                'name': employee.name,
+                'old_status': old_status,
+                'new_status': employee.status,
+                'updated_at': employee.updated_at
+            }
+        }, status=status.HTTP_200_OK)
+        
+    except Employee.DoesNotExist:
+        return Response({
+            'status': 'error',
+            'message': 'Employee not found'
+        }, status=status.HTTP_404_NOT_FOUND)
+        
+    except Exception as e:
+        logger.error(f"Error changing employee status {employee_id}: {str(e)}")
+        return Response({
+            'status': 'error',
+            'message': f'Internal server error: {str(e)}'
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['PATCH'])
+def toggle_employee_status(request, employee_id):
+    """
+    Toggle employee status (active <-> inactive)
+    No request body needed - automatically toggles current status
+    """
+    try:
+        # Get the employee object
+        employee = get_object_or_404(Employee, id=employee_id)
+        
+        # Store old status for response
+        old_status = employee.status
+        
+        # Toggle the status
+        employee.status = not employee.status
+        employee.save(update_fields=['status', 'updated_at'])
+        
+        # Prepare response message
+        action_performed = 'activated' if employee.status else 'deactivated'
+        
+        return Response({
+            'status': 'success',
+            'message': f'Employee status toggled - {action_performed} successfully',
+            'data': {
+                'employee_id': employee.id,
+                'name': employee.name,
+                'old_status': old_status,
+                'new_status': employee.status,
+                'updated_at': employee.updated_at
+            }
+        }, status=status.HTTP_200_OK)
+        
+    except Employee.DoesNotExist:
+        return Response({
+            'status': 'error',
+            'message': 'Employee not found'
+        }, status=status.HTTP_404_NOT_FOUND)
+        
+    except Exception as e:
+        logger.error(f"Error toggling employee status {employee_id}: {str(e)}")
+        return Response({
+            'status': 'error',
+            'message': f'Internal server error: {str(e)}'
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

@@ -2,7 +2,7 @@
 from django.urls import path
 from django.conf import settings
 from django.conf.urls.static import static
-from xe_farm.views.employee.emp_views import (save_employee_data,get_employee_list, get_employee_detail,  edit_employee_data, delete_employee, restore_employee)
+from xe_farm.views.employee.emp_views import (save_employee_data,get_employee_list, get_employee_detail,  edit_employee_data, delete_employee, restore_employee, change_employee_status, toggle_employee_status)
 from xe_farm.views.merchant.merchant_views import (save_merchant_data, get_all_merchants, get_merchant_by_id, update_merchant_data, delete_merchant)
 from xe_farm.views.farm_segment.farm_segment_views import (save_farm_segment_data, get_all_farm_segments, get_farm_segment_by_id, update_farm_segment_data, delete_farm_segment)
 from xe_farm.views.crops.crop_views import (save_crop_data, get_all_crops, get_crop_by_id, update_crop_data, delete_crop)
@@ -14,6 +14,7 @@ from xe_farm.views.jobs.job_view import (
 )
 from xe_farm.views.expense.expense_view import (save_expense_data, get_expense_list, get_expense_detail, edit_expense_data, delete_expense, get_expense_statistics
 )   
+from xe_farm.views.wages.wages_view import (save_wage_data, get_wage_list, get_wage_detail, edit_wage_data, delete_wage, get_employee_wages, end_current_wage, get_wage_statistics)
 
 urlpatterns = [
     path('api/employees/', save_employee_data, name='save_employee_data'),
@@ -26,6 +27,9 @@ urlpatterns = [
     # Employee Delete APIs
     path('api/employees/<int:employee_id>/delete', delete_employee, name='delete_employee'),
     path('api/employees/<int:employee_id>/restore',restore_employee, name='restore_employee'),
+    path('api/employees/<int:employee_id>/status', change_employee_status, name='change_employee_status'),
+    path('api/employees/<int:employee_id>/toggle-status', toggle_employee_status, name='toggle_employee_status'),
+
 
     #Merchant URLs
     path('api/merchants/', save_merchant_data, name='save_merchant'),
@@ -89,6 +93,23 @@ urlpatterns = [
     path('api/expenses/<int:expense_id>/update/', edit_expense_data, name='update_expense'),
     path('api/expenses/<int:expense_id>/delete/', delete_expense, name='delete_expense'),
     path('api/expenses/statistics/', get_expense_statistics, name='get_expense_statistics'),
+
+    # Wage CRUD Operations
+    path('wages/', save_wage_data, name='save_wage_data'),  # POST - Create wage
+    path('wages/list/', get_wage_list, name='get_wage_list'),  # GET - List wages with filters
+    path('wages/<int:wage_id>/', get_wage_detail, name='get_wage_detail'),  # GET - Get wage details
+    path('wages/<int:wage_id>/update/', edit_wage_data, name='edit_wage_data'),  # PUT - Update wage
+    path('wages/<int:wage_id>/delete/', delete_wage, name='delete_wage'),  # DELETE - Delete wage
+    
+    # Employee Wages
+    path('employees/<int:employee_id>/wages/', get_employee_wages, name='get_employee_wages'),  # GET - Get all wages for employee
+    
+    # Wage Management
+    path('wages/<int:wage_id>/end/', end_current_wage, name='end_current_wage'),  # POST - End current wage
+    
+    # Statistics
+    path('wages/statistics/', get_wage_statistics, name='get_wage_statistics'),  # GET - Wage statistics
+
 ]
 if settings.DEBUG:
     urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)

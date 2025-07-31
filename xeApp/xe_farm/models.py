@@ -20,7 +20,6 @@ class Employee(models.Model):
     joining_date = models.DateField()
     emp_type = models.CharField(max_length=100, choices=EMP_TYPE_CHOICES)
     gender = models.CharField(max_length=10, choices=GENDER_CHOICES)
-    wages = models.DecimalField(max_digits=10, decimal_places=2)
     image_url = models.URLField(max_length=500, blank=True, null=True)
     contact = models.CharField(max_length=20)
     status = models.BooleanField(default=True)
@@ -310,3 +309,68 @@ class Expense(models.Model):
 
     def __str__(self):
         return f"{self.expense_name} - {self.amount}"
+
+class Wage(models.Model):
+    employee = models.ForeignKey(Employee, on_delete=models.CASCADE, related_name='wages')
+    effective_from = models.DateField(verbose_name="Effective From")
+    effective_to = models.DateField(blank=True, null=True, verbose_name="Effective To")
+    amount = models.DecimalField(
+        max_digits=10, 
+        decimal_places=2, 
+        validators=[MinValueValidator(Decimal('0.01'))],
+        verbose_name="Wage Amount"
+    )
+    remarks = models.TextField(blank=True, null=True, verbose_name="Notes")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        db_table = 'xe_wages'
+        ordering = ['-effective_from', '-created_at']
+        verbose_name = 'Wage'
+        verbose_name_plural = 'Wages'
+        # Ensure no overlapping wage periods for the same employee
+        constraints = [
+            models.CheckConstraint(
+                check=models.Q(effective_to__isnull=True) | models.Q(effective_to__gte=models.F('effective_from')),
+                name='wage_effective_to_gte_effective_from'
+            )
+        ]
+    
+    def __str__(self):
+        return f"{self.employee.name} - ₹{self.amount} (from {self.effective_from})"
+    
+    def clean(self):
+        from django.core.exceptions import ValidationError
+        
+        # Validate that effective_to is after effective_from if provided
+        if self.effective_to and self.effective_from and self.effective_to < self.effective_from:
+            raise ValidationError('Effective to date must be after effective from date.')
+    
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        super().save(*args, **kwargs)
+    
+    @property
+    def is_current(self):
+        """Check if this wage record is currently active"""
+        from datetime import date
+        today = date.today()
+        
+        if self.effective_to:
+            return self.effective_from <= today <= self.effective_to
+        else:
+            return self.effective_from <= today
+    
+    @classmethod
+    def get_current_wage(cls, employee):
+        """Get the current active wage for an employee"""
+        from datetime import date
+        today = date.today()
+        
+        return cls.objects.filter(
+            employee=employee,
+            effective_from__lte=today
+        ).filter(
+            models.Q(effective_to__isnull=True) | models.Q(effective_to__gte=today)
+        ).order_by('-effective_from').first()

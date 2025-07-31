@@ -1,7 +1,8 @@
+from datetime import date
 from decimal import Decimal
 from django.db import transaction
 from rest_framework import serializers
-from .models import Employee, Merchant, FarmSegment, Crop, CropVariant, Yield, YieldVariant, YieldFarmSegment, Sale, SaleVariant, Job, JobEmployee,JobFarmSegment, Expense
+from .models import Employee, Merchant, FarmSegment, Crop, CropVariant, Wage, Yield, YieldVariant, YieldFarmSegment, Sale, SaleVariant, Job, JobEmployee,JobFarmSegment, Expense
 
 # Employee Serializer
 class EmployeeSerializer(serializers.ModelSerializer):
@@ -9,15 +10,12 @@ class EmployeeSerializer(serializers.ModelSerializer):
         model = Employee
         fields = [
             'id', 'name', 'tamil_name', 'joining_date', 
-            'emp_type', 'gender', 'wages', 'image_url', 
+            'emp_type', 'gender','image_url', 
             'contact', 'status', 'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
     
-    def validate_wages(self, value):
-        if value < 0:
-            raise serializers.ValidationError("Wages cannot be negative")
-        return value
+    
     
     def validate_contact(self, value):
         if not value.isdigit():
@@ -662,3 +660,67 @@ class ExpenseSerializer(serializers.ModelSerializer):
         if not value.strip():
             raise serializers.ValidationError("Spent by field cannot be empty")
         return value.strip()
+
+class WageSerializer(serializers.ModelSerializer):
+    employee_name = serializers.CharField(source='employee.name', read_only=True)
+    employee_contact = serializers.CharField(source='employee.contact', read_only=True)
+    is_current = serializers.BooleanField(read_only=True)
+    
+    class Meta:
+        model = Wage
+        fields = [
+            'id', 'employee', 'employee_name', 'employee_contact',
+            'effective_from', 'effective_to', 'amount', 'remarks',
+            'is_current', 'created_at', 'updated_at'
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at', 'is_current']
+    
+    def validate_amount(self, value):
+        if value <= 0:
+            raise serializers.ValidationError("Wage amount must be greater than 0")
+        if value > Decimal('999999.99'):
+            raise serializers.ValidationError("Wage amount is too large")
+        return value
+    
+    def validate_effective_from(self, value):
+        if not value:
+            raise serializers.ValidationError("Effective from date is required")
+        return value
+    
+    def validate(self, data):
+        effective_from = data.get('effective_from')
+        effective_to = data.get('effective_to')
+        
+        # Validate date range
+        if effective_from and effective_to and effective_to < effective_from:
+            raise serializers.ValidationError("Effective to date must be after effective from date")
+        
+        # Check for overlapping wage periods for the same employee
+        employee = data.get('employee')
+        if employee:
+            # Get existing wages for this employee
+            existing_wages = Wage.objects.filter(employee=employee)
+            
+            # If this is an update, exclude the current instance
+            if self.instance:
+                existing_wages = existing_wages.exclude(id=self.instance.id)
+            
+            # Check for overlaps
+            for wage in existing_wages:
+                if self._check_date_overlap(effective_from, effective_to, wage.effective_from, wage.effective_to):
+                    raise serializers.ValidationError(
+                        f"This wage period overlaps with existing wage from {wage.effective_from} to {wage.effective_to or 'present'}"
+                    )
+        
+        return data
+    
+    def _check_date_overlap(self, start1, end1, start2, end2):
+        """Check if two date ranges overlap"""
+        # If either range has no end date, treat it as ongoing
+        if end1 is None:
+            end1 = date.max
+        if end2 is None:
+            end2 = date.max
+        
+        # Check for overlap
+        return start1 <= end2 and start2 <= end1
