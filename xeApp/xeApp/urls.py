@@ -95,20 +95,20 @@ urlpatterns = [
     path('api/expenses/statistics/', get_expense_statistics, name='get_expense_statistics'),
 
     # Wage CRUD Operations
-    path('wages/', save_wage_data, name='save_wage_data'),  # POST - Create wage
-    path('wages/list/', get_wage_list, name='get_wage_list'),  # GET - List wages with filters
-    path('wages/<int:wage_id>/', get_wage_detail, name='get_wage_detail'),  # GET - Get wage details
-    path('wages/<int:wage_id>/update/', edit_wage_data, name='edit_wage_data'),  # PUT - Update wage
-    path('wages/<int:wage_id>/delete/', delete_wage, name='delete_wage'),  # DELETE - Delete wage
+    path('api/wages/', save_wage_data, name='save_wage_data'),  # POST - Create wage
+    path('api/wages/list/', get_wage_list, name='get_wage_list'),  # GET - List wages with filters
+    path('api/wages/<int:wage_id>/', get_wage_detail, name='get_wage_detail'),  # GET - Get wage details
+    path('api/wages/<int:wage_id>/update/', edit_wage_data, name='edit_wage_data'),  # PUT - Update wage
+    path('api/wages/<int:wage_id>/delete/', delete_wage, name='delete_wage'),  # DELETE - Delete wage
     
     # Employee Wages
-    path('employees/<int:employee_id>/wages/', get_employee_wages, name='get_employee_wages'),  # GET - Get all wages for employee
+    path('api/employees/<int:employee_id>/wages/', get_employee_wages, name='get_employee_wages'),  # GET - Get all wages for employee
     
     # Wage Management
-    path('wages/<int:wage_id>/end/', end_current_wage, name='end_current_wage'),  # POST - End current wage
+    path('api/wages/<int:wage_id>/end/', end_current_wage, name='end_current_wage'),  # POST - End current wage
     
     # Statistics
-    path('wages/statistics/', get_wage_statistics, name='get_wage_statistics'),  # GET - Wage statistics
+    path('api/wages/statistics/', get_wage_statistics, name='get_wage_statistics'),  # GET - Wage statistics
 
 ]
 if settings.DEBUG:
