@@ -15,7 +15,11 @@ from xe_farm.views.jobs.job_view import (
 from xe_farm.views.expense.expense_view import (save_expense_data, get_expense_list, get_expense_detail, edit_expense_data, delete_expense, get_expense_statistics
 )   
 from xe_farm.views.wages.wages_view import (save_wage_data, get_wage_list, get_wage_detail, edit_wage_data, delete_wage, get_employee_wages, end_current_wage, get_wage_statistics)
-
+from xe_farm.views.attendance.attendance_view import (
+    check_attendance_exists, create_daily_attendance, create_wage_payment, delete_attendance, get_attendance_dashboard, get_attendance_list, get_attendance_detail, get_employee_attendance_history, get_monthly_attendance_report, get_wage_payments, get_wage_summary_detail, mark_attendance_processed,
+    update_employee_attendance, generate_wage_summary, get_wage_summaries,
+    bulk_update_attendance, export_attendance_report
+)
 urlpatterns = [
     path('api/employees/', save_employee_data, name='save_employee_data'),
 
@@ -109,6 +113,39 @@ urlpatterns = [
     
     # Statistics
     path('api/wages/statistics/', get_wage_statistics, name='get_wage_statistics'),  # GET - Wage statistics
+
+    # Daily Attendance
+    path('api/attendance/create/', create_daily_attendance, name='create_daily_attendance'),
+    path('api/attendance/list/', get_attendance_list, name='get_attendance_list'),
+    path('api/attendance/<int:attendance_id>/', get_attendance_detail, name='get_attendance_detail'),
+    path('api/attendance/<int:attendance_id>/delete/', delete_attendance, name='delete_attendance'),
+    path('api/attendance/<int:attendance_id>/mark-processed/', mark_attendance_processed, name='mark_attendance_processed'),
+    path('api/attendance/check-exists/', check_attendance_exists, name='check_attendance_exists'),
+    
+    # Employee Attendance
+    path('api/attendance/employee/<int:attendance_id>/update/', update_employee_attendance, name='update_employee_attendance'),
+    path('api/attendance/bulk-update/', bulk_update_attendance, name='bulk_update_attendance'),
+    path('api/employee/<int:employee_id>/attendance-history/', get_employee_attendance_history, name='get_employee_attendance_history'),
+    
+    # ============= WAGE MANAGEMENT =============
+    
+    # Wage Summaries
+    path('api/wages/summaries/generate/', generate_wage_summary, name='generate_wage_summary'),
+    path('api/wages/summaries/list/', get_wage_summaries, name='get_wage_summaries'),
+    path('api/wages/summaries/<int:summary_id>/', get_wage_summary_detail, name='get_wage_summary_detail'),
+    
+    # Wage Payments
+    path('api/wages/payments/create/', create_wage_payment, name='create_wage_payment'),
+    path('api/wages/payments/list/', get_wage_payments, name='get_wage_payments'),
+    
+    # ============= REPORTS & ANALYTICS =============
+    
+    # Dashboard
+    path('api/dashboard/attendance/', get_attendance_dashboard, name='get_attendance_dashboard'),
+    
+    # Reports
+    path('api/reports/monthly-attendance/', get_monthly_attendance_report, name='get_monthly_attendance_report'),
+    path('api/reports/attendance/export/', export_attendance_report, name='export_attendance_report'),
 
 ]
 if settings.DEBUG:

@@ -2,6 +2,8 @@ from django.db import models
 from django.core.validators import MinValueValidator
 from decimal import Decimal
 
+from django.forms import ValidationError
+
 class Employee(models.Model):
     GENDER_CHOICES = [
         ('Male', 'Male'),
@@ -367,10 +369,413 @@ class Wage(models.Model):
         """Get the current active wage for an employee"""
         from datetime import date
         today = date.today()
-        
+
         return cls.objects.filter(
             employee=employee,
             effective_from__lte=today
         ).filter(
             models.Q(effective_to__isnull=True) | models.Q(effective_to__gte=today)
         ).order_by('-effective_from').first()
+    
+class Attendance(models.Model):
+    """Daily attendance record for all employees"""
+    
+    ATTENDANCE_STATUS_CHOICES = [
+        ('present', 'Present'),
+        ('absent', 'Absent'),
+        ('half_day', 'Half Day'),
+        ('overtime', 'Overtime'),
+        ('leave', 'Leave'),
+    ]
+    
+    date = models.DateField(verbose_name="Attendance Date")
+    total_employees_present = models.PositiveIntegerField(default=0, verbose_name="Total Present")
+    remarks = models.TextField(blank=True, null=True, verbose_name="Daily Remarks")
+    is_processed = models.BooleanField(default=False, verbose_name="Wages Calculated")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        db_table = 'xe_attendance'
+        ordering = ['-date']
+        verbose_name = 'Daily Attendance'
+        verbose_name_plural = 'Daily Attendances'
+        unique_together = ['date']  # One record per date
+    
+    def __str__(self):
+        return f"Attendance - {self.date} ({self.total_employees_present} present)"
+    
+    def save(self, *args, **kwargs):
+        # Auto-calculate total present employees
+        if self.pk:  # If updating existing record
+            self.total_employees_present = self.employee_attendances.filter(
+                status__in=['present', 'half_day', 'overtime']
+            ).count()
+        super().save(*args, **kwargs)
+
+
+class EmployeeAttendance(models.Model):
+    """Individual employee attendance for each day"""
+    
+    ATTENDANCE_STATUS_CHOICES = [
+        ('present', 'Present'),
+        ('absent', 'Absent'),
+        ('half_day', 'Half Day'),
+        ('overtime', 'Overtime'),
+        ('leave', 'Leave'),
+    ]
+    
+    attendance = models.ForeignKey(
+        Attendance, 
+        on_delete=models.CASCADE, 
+        related_name='employee_attendances'
+    )
+    employee = models.ForeignKey(
+        'Employee',  # Reference to your existing Employee model
+        on_delete=models.CASCADE, 
+        related_name='daily_attendances'
+    )
+    status = models.CharField(max_length=20, choices=ATTENDANCE_STATUS_CHOICES)
+    hours_worked = models.DecimalField(
+        max_digits=4, 
+        decimal_places=2, 
+        default=8.00,
+        validators=[MinValueValidator(Decimal('0'))],
+        verbose_name="Hours Worked"
+    )
+    overtime_hours = models.DecimalField(
+        max_digits=4, 
+        decimal_places=2, 
+        default=0.00,
+        validators=[MinValueValidator(Decimal('0'))],
+        verbose_name="Overtime Hours"
+    )
+    daily_wage_amount = models.DecimalField(
+        max_digits=10, 
+        decimal_places=2, 
+        default=0.00,
+        validators=[MinValueValidator(Decimal('0'))],
+        verbose_name="Daily Wage Earned"
+    )
+    overtime_amount = models.DecimalField(
+        max_digits=10, 
+        decimal_places=2, 
+        default=0.00,
+        validators=[MinValueValidator(Decimal('0'))],
+        verbose_name="Overtime Amount"
+    )
+    total_amount = models.DecimalField(
+        max_digits=10, 
+        decimal_places=2, 
+        default=0.00,
+        validators=[MinValueValidator(Decimal('0'))],
+        verbose_name="Total Amount Earned"
+    )
+    remarks = models.CharField(max_length=500, blank=True, null=True, verbose_name="Notes")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        db_table = 'xe_employee_attendance'
+        ordering = ['-attendance__date', 'employee__name']
+        verbose_name = 'Employee Attendance'
+        verbose_name_plural = 'Employee Attendances'
+        unique_together = ['attendance', 'employee']  # One record per employee per day
+    
+    def __str__(self):
+        return f"{self.employee.name} - {self.attendance.date} ({self.status})"
+    
+    def save(self, *args, **kwargs):
+        # Auto-calculate wage amounts based on current wage rate
+        if not self.daily_wage_amount or self.daily_wage_amount == 0:
+            current_wage = Wage.get_current_wage(self.employee)
+            if current_wage:
+                base_daily_rate = current_wage.amount
+                
+                # Calculate based on status
+                if self.status == 'present':
+                    self.daily_wage_amount = base_daily_rate
+                elif self.status == 'half_day':
+                    self.daily_wage_amount = base_daily_rate / 2
+                elif self.status == 'overtime':
+                    self.daily_wage_amount = base_daily_rate
+                    # Overtime rate (1.5x for overtime hours)
+                    self.overtime_amount = (base_daily_rate / 8) * self.overtime_hours * Decimal('1.5')
+                elif self.status in ['absent', 'leave']:
+                    self.daily_wage_amount = Decimal('0')
+                    self.overtime_amount = Decimal('0')
+        
+        # Calculate total amount
+        self.total_amount = self.daily_wage_amount + self.overtime_amount
+        
+        super().save(*args, **kwargs)
+
+
+class EmployeeWageSummary(models.Model):
+    """Monthly/Weekly wage summary for each employee"""
+    
+    PERIOD_TYPE_CHOICES = [
+        ('weekly', 'Weekly'),
+        ('monthly', 'Monthly'),
+        ('custom', 'Custom Period'),
+    ]
+    
+    PAYMENT_STATUS_CHOICES = [
+        ('pending', 'Pending'),
+        ('partial', 'Partially Paid'),
+        ('paid', 'Fully Paid'),
+        ('cancelled', 'Cancelled'),
+    ]
+    
+    employee = models.ForeignKey(
+        'Employee',
+        on_delete=models.CASCADE,
+        related_name='wage_summaries'
+    )
+    period_type = models.CharField(max_length=20, choices=PERIOD_TYPE_CHOICES, default='weekly')
+    period_start = models.DateField(verbose_name="Period Start Date")
+    period_end = models.DateField(verbose_name="Period End Date")
+    
+    # Attendance Summary
+    total_days_present = models.PositiveIntegerField(default=0)
+    total_days_absent = models.PositiveIntegerField(default=0)
+    total_half_days = models.PositiveIntegerField(default=0)
+    total_overtime_hours = models.DecimalField(max_digits=6, decimal_places=2, default=0)
+    
+    # Financial Summary
+    total_wage_amount = models.DecimalField(
+        max_digits=12, 
+        decimal_places=2, 
+        default=0,
+        validators=[MinValueValidator(Decimal('0'))],
+        verbose_name="Total Wage Amount"
+    )
+    total_overtime_amount = models.DecimalField(
+        max_digits=12, 
+        decimal_places=2, 
+        default=0,
+        validators=[MinValueValidator(Decimal('0'))],
+        verbose_name="Total Overtime Amount"
+    )
+    bonus_amount = models.DecimalField(
+        max_digits=10, 
+        decimal_places=2, 
+        default=0,
+        validators=[MinValueValidator(Decimal('0'))],
+        verbose_name="Bonus Amount"
+    )
+    deduction_amount = models.DecimalField(
+        max_digits=10, 
+        decimal_places=2, 
+        default=0,
+        validators=[MinValueValidator(Decimal('0'))],
+        verbose_name="Deductions"
+    )
+    gross_amount = models.DecimalField(
+        max_digits=12, 
+        decimal_places=2, 
+        default=0,
+        validators=[MinValueValidator(Decimal('0'))],
+        verbose_name="Gross Amount"
+    )
+    net_amount = models.DecimalField(
+        max_digits=12, 
+        decimal_places=2, 
+        default=0,
+        validators=[MinValueValidator(Decimal('0'))],
+        verbose_name="Net Payable Amount"
+    )
+    
+    # Payment Tracking
+    paid_amount = models.DecimalField(
+        max_digits=12, 
+        decimal_places=2, 
+        default=0,
+        validators=[MinValueValidator(Decimal('0'))],
+        verbose_name="Amount Paid"
+    )
+    pending_amount = models.DecimalField(
+        max_digits=12, 
+        decimal_places=2, 
+        default=0,
+        validators=[MinValueValidator(Decimal('0'))],
+        verbose_name="Pending Amount"
+    )
+    payment_status = models.CharField(max_length=20, choices=PAYMENT_STATUS_CHOICES, default='pending')
+    
+    # Metadata
+    is_processed = models.BooleanField(default=False, verbose_name="Summary Processed")
+    remarks = models.TextField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        db_table = 'xe_employee_wage_summary'
+        ordering = ['-period_end', 'employee__name']
+        verbose_name = 'Employee Wage Summary'
+        verbose_name_plural = 'Employee Wage Summaries'
+        unique_together = ['employee', 'period_start', 'period_end']
+    
+    def __str__(self):
+        return f"{self.employee.name} - {self.period_start} to {self.period_end} (₹{self.net_amount})"
+    
+    def save(self, *args, **kwargs):
+        # Auto-calculate amounts
+        self.gross_amount = self.total_wage_amount + self.total_overtime_amount + self.bonus_amount
+        self.net_amount = self.gross_amount - self.deduction_amount
+        self.pending_amount = self.net_amount - self.paid_amount
+        
+        # Update payment status based on amounts
+        if self.paid_amount == 0:
+            self.payment_status = 'pending'
+        elif self.paid_amount >= self.net_amount:
+            self.payment_status = 'paid'
+            self.pending_amount = Decimal('0')
+        else:
+            self.payment_status = 'partial'
+        
+        super().save(*args, **kwargs)
+    
+    def clean(self):
+        if self.period_end < self.period_start:
+            raise ValidationError('Period end date must be after start date.')
+        
+        if self.paid_amount > self.net_amount:
+            raise ValidationError('Paid amount cannot exceed net amount.')
+
+
+class WagePayment(models.Model):
+    """Track individual wage payments"""
+    
+    PAYMENT_MODE_CHOICES = [
+        ('cash', 'Cash'),
+        ('bank_transfer', 'Bank Transfer'),
+        ('upi', 'UPI'),
+        ('cheque', 'Cheque'),
+        ('card', 'Card'),
+    ]
+    
+    wage_summary = models.ForeignKey(
+        EmployeeWageSummary,
+        on_delete=models.CASCADE,
+        related_name='payments'
+    )
+    payment_date = models.DateField(verbose_name="Payment Date")
+    amount = models.DecimalField(
+        max_digits=12, 
+        decimal_places=2,
+        validators=[MinValueValidator(Decimal('0.01'))],
+        verbose_name="Payment Amount"
+    )
+    payment_mode = models.CharField(max_length=20, choices=PAYMENT_MODE_CHOICES)
+    reference_number = models.CharField(max_length=100, blank=True, null=True, verbose_name="Reference/Transaction ID")
+    paid_by = models.CharField(max_length=255, verbose_name="Paid By")
+    remarks = models.TextField(blank=True, null=True)
+    receipt_url = models.URLField(max_length=500, blank=True, null=True, verbose_name="Receipt/Proof URL")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        db_table = 'xe_wage_payments'
+        ordering = ['-payment_date', '-created_at']
+        verbose_name = 'Wage Payment'
+        verbose_name_plural = 'Wage Payments'
+    
+    def __str__(self):
+        return f"Payment ₹{self.amount} to {self.wage_summary.employee.name} on {self.payment_date}"
+    
+    def save(self, *args, **kwargs):
+        super().save(*args, **kwargs)
+        
+        # Update wage summary paid amount
+        total_paid = self.wage_summary.payments.aggregate(
+            total=models.Sum('amount')
+        )['total'] or Decimal('0')
+        
+        self.wage_summary.paid_amount = total_paid
+        self.wage_summary.save()
+
+
+# Helper function to create attendance records
+def create_daily_attendance(attendance_date, employee_data):
+    """
+    Helper function to create daily attendance
+    
+    employee_data format:
+    [
+        {'employee_id': 1, 'status': 'present', 'hours_worked': 8, 'overtime_hours': 2},
+        {'employee_id': 2, 'status': 'absent'},
+        ...
+    ]
+    """
+    from .models import Employee
+    
+    # Create or get attendance record for the date
+    attendance, created = Attendance.objects.get_or_create(
+        date=attendance_date,
+        defaults={'total_employees_present': 0}
+    )
+    
+    # Create employee attendance records
+    for emp_data in employee_data:
+        employee = Employee.objects.get(id=emp_data['employee_id'])
+        
+        emp_attendance, created = EmployeeAttendance.objects.get_or_create(
+            attendance=attendance,
+            employee=employee,
+            defaults={
+                'status': emp_data.get('status', 'absent'),
+                'hours_worked': emp_data.get('hours_worked', 8.0),
+                'overtime_hours': emp_data.get('overtime_hours', 0.0),
+            }
+        )
+    
+    # Update total present count
+    attendance.save()
+    
+    return attendance
+
+
+# Helper function to generate wage summary
+def generate_wage_summary(employee, start_date, end_date, period_type='weekly'):
+    """Generate wage summary for an employee for a given period"""
+    
+    attendances = EmployeeAttendance.objects.filter(
+        employee=employee,
+        attendance__date__range=[start_date, end_date]
+    )
+    
+    # Calculate totals
+    total_present = attendances.filter(status='present').count()
+    total_absent = attendances.filter(status='absent').count()
+    total_half_days = attendances.filter(status='half_day').count()
+    total_overtime_hours = attendances.aggregate(
+        total=models.Sum('overtime_hours')
+    )['total'] or Decimal('0')
+    
+    total_wage = attendances.aggregate(
+        total=models.Sum('daily_wage_amount')
+    )['total'] or Decimal('0')
+    
+    total_overtime = attendances.aggregate(
+        total=models.Sum('overtime_amount')
+    )['total'] or Decimal('0')
+    
+    # Create or update wage summary
+    summary, created = EmployeeWageSummary.objects.get_or_create(
+        employee=employee,
+        period_start=start_date,
+        period_end=end_date,
+        defaults={
+            'period_type': period_type,
+            'total_days_present': total_present,
+            'total_days_absent': total_absent,
+            'total_half_days': total_half_days,
+            'total_overtime_hours': total_overtime_hours,
+            'total_wage_amount': total_wage,
+            'total_overtime_amount': total_overtime,
+            'is_processed': True,
+        }
+    )
+    
+    return summary

@@ -2,7 +2,7 @@ from datetime import date
 from decimal import Decimal
 from django.db import transaction
 from rest_framework import serializers
-from .models import Employee, Merchant, FarmSegment, Crop, CropVariant, Wage, Yield, YieldVariant, YieldFarmSegment, Sale, SaleVariant, Job, JobEmployee,JobFarmSegment, Expense
+from .models import Attendance, Employee, EmployeeAttendance, EmployeeWageSummary, Merchant, FarmSegment, Crop, CropVariant, Wage, WagePayment, Yield, YieldVariant, YieldFarmSegment, Sale, SaleVariant, Job, JobEmployee,JobFarmSegment, Expense
 
 # Employee Serializer
 class EmployeeSerializer(serializers.ModelSerializer):
@@ -724,3 +724,371 @@ class WageSerializer(serializers.ModelSerializer):
         
         # Check for overlap
         return start1 <= end2 and start2 <= end1
+    
+class EmployeeAttendanceSerializer(serializers.ModelSerializer):
+    employee_name = serializers.CharField(source='employee.name', read_only=True)
+    employee_contact = serializers.CharField(source='employee.contact', read_only=True)
+    current_wage_rate = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = EmployeeAttendance
+        fields = [
+            'id', 'employee', 'employee_name', 'employee_contact',
+            'status', 'hours_worked', 'overtime_hours',
+            'daily_wage_amount', 'overtime_amount', 'total_amount',
+            'current_wage_rate', 'remarks', 'created_at', 'updated_at'
+        ]
+        read_only_fields = [
+            'id', 'daily_wage_amount', 'overtime_amount', 'total_amount',
+            'created_at', 'updated_at'
+        ]
+    
+    def get_current_wage_rate(self, obj):
+        """Get current wage rate for the employee"""
+        current_wage = Wage.get_current_wage(obj.employee)
+        return float(current_wage.amount) if current_wage else 0
+    
+    def validate_hours_worked(self, value):
+        if value < 0:
+            raise serializers.ValidationError("Hours worked cannot be negative")
+        if value > 24:
+            raise serializers.ValidationError("Hours worked cannot exceed 24 hours")
+        return value
+    
+    def validate_overtime_hours(self, value):
+        if value < 0:
+            raise serializers.ValidationError("Overtime hours cannot be negative")
+        if value > 12:
+            raise serializers.ValidationError("Overtime hours cannot exceed 12 hours")
+        return value
+    
+    def validate(self, data):
+        status = data.get('status')
+        hours_worked = data.get('hours_worked', 8)
+        overtime_hours = data.get('overtime_hours', 0)
+        
+        # Validate hours based on status
+        if status == 'absent' and (hours_worked > 0 or overtime_hours > 0):
+            raise serializers.ValidationError(
+                "Absent employees cannot have worked hours or overtime"
+            )
+        
+        if status == 'half_day' and hours_worked > 4:
+            raise serializers.ValidationError(
+                "Half day attendance cannot have more than 4 hours"
+            )
+        
+        if status != 'overtime' and overtime_hours > 0:
+            raise serializers.ValidationError(
+                "Overtime hours can only be set for overtime status"
+            )
+        
+        return data
+
+
+class AttendanceSerializer(serializers.ModelSerializer):
+    employee_attendances = EmployeeAttendanceSerializer(many=True, read_only=True)
+    attendance_summary = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = Attendance
+        fields = [
+            'id', 'date', 'total_employees_present', 'remarks',
+            'is_processed', 'employee_attendances', 'attendance_summary',
+            'created_at', 'updated_at'
+        ]
+        read_only_fields = [
+            'id', 'total_employees_present', 'created_at', 'updated_at'
+        ]
+    
+    def get_attendance_summary(self, obj):
+        """Get attendance summary for the day"""
+        attendances = obj.employee_attendances.all()
+        
+        summary = {
+            'total_employees': attendances.count(),
+            'present': attendances.filter(status='present').count(),
+            'absent': attendances.filter(status='absent').count(),
+            'half_day': attendances.filter(status='half_day').count(),
+            'overtime': attendances.filter(status='overtime').count(),
+            'leave': attendances.filter(status='leave').count(),
+            'total_wage_amount': float(sum(att.total_amount for att in attendances)),
+            'total_overtime_hours': float(sum(att.overtime_hours for att in attendances))
+        }
+        
+        return summary
+    
+    def validate_date(self, value):
+        if not value:
+            raise serializers.ValidationError("Date is required")
+        
+        # Don't allow future dates beyond tomorrow
+        from datetime import timedelta
+        tomorrow = date.today() + timedelta(days=1)
+        if value > tomorrow:
+            raise serializers.ValidationError("Cannot create attendance for future dates")
+        
+        return value
+
+
+class CreateAttendanceSerializer(serializers.Serializer):
+    """Serializer for creating daily attendance with multiple employees"""
+    
+    date = serializers.DateField()
+    remarks = serializers.CharField(max_length=500, required=False, allow_blank=True)
+    employee_attendances = serializers.ListField(
+        child=serializers.DictField(),
+        min_length=1,
+        error_messages={
+            'min_length': 'At least one employee attendance is required'
+        }
+    )
+    
+    def validate_date(self, value):
+        if not value:
+            raise serializers.ValidationError("Date is required")
+        
+        # Check if attendance already exists for this date
+        if Attendance.objects.filter(date=value).exists():
+            raise serializers.ValidationError(
+                f"Attendance for {value} already exists. Use update instead."
+            )
+        
+        return value
+    
+    def validate_employee_attendances(self, value):
+        """Validate employee attendance data"""
+        if not value:
+            raise serializers.ValidationError("Employee attendances are required")
+        
+        employee_ids = []
+        for i, attendance_data in enumerate(value):
+            # Validate required fields
+            if 'employee_id' not in attendance_data:
+                raise serializers.ValidationError(
+                    f"Employee attendance {i+1}: employee_id is required"
+                )
+            
+            if 'status' not in attendance_data:
+                raise serializers.ValidationError(
+                    f"Employee attendance {i+1}: status is required"
+                )
+            
+            employee_id = attendance_data['employee_id']
+            status = attendance_data['status']
+            
+            # Check for duplicate employees
+            if employee_id in employee_ids:
+                raise serializers.ValidationError(
+                    f"Duplicate employee ID {employee_id} found"
+                )
+            employee_ids.append(employee_id)
+            
+            # Validate employee exists and is active
+            try:
+                employee = Employee.objects.get(id=employee_id)
+                if not employee.status:
+                    raise serializers.ValidationError(
+                        f"Employee {employee.name} is inactive"
+                    )
+            except Employee.DoesNotExist:
+                raise serializers.ValidationError(
+                    f"Employee with ID {employee_id} does not exist"
+                )
+            
+            # Validate status
+            valid_statuses = ['present', 'absent', 'half_day', 'overtime', 'leave']
+            if status not in valid_statuses:
+                raise serializers.ValidationError(
+                    f"Invalid status '{status}' for employee {employee_id}"
+                )
+            
+            # Validate hours based on status
+            hours_worked = attendance_data.get('hours_worked', 8.0)
+            overtime_hours = attendance_data.get('overtime_hours', 0.0)
+            
+            if status == 'absent' and (hours_worked > 0 or overtime_hours > 0):
+                raise serializers.ValidationError(
+                    f"Employee {employee_id}: Absent employees cannot have worked hours"
+                )
+            
+            if status == 'half_day' and hours_worked > 4:
+                raise serializers.ValidationError(
+                    f"Employee {employee_id}: Half day cannot exceed 4 hours"
+                )
+        
+        return value
+
+
+class EmployeeWageSummarySerializer(serializers.ModelSerializer):
+    employee_name = serializers.CharField(source='employee.name', read_only=True)
+    employee_contact = serializers.CharField(source='employee.contact', read_only=True)
+    payments = serializers.SerializerMethodField()
+    payment_history_count = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = EmployeeWageSummary
+        fields = [
+            'id', 'employee', 'employee_name', 'employee_contact',
+            'period_type', 'period_start', 'period_end',
+            'total_days_present', 'total_days_absent', 'total_half_days',
+            'total_overtime_hours', 'total_wage_amount', 'total_overtime_amount',
+            'bonus_amount', 'deduction_amount', 'gross_amount', 'net_amount',
+            'paid_amount', 'pending_amount', 'payment_status',
+            'is_processed', 'remarks', 'payments', 'payment_history_count',
+            'created_at', 'updated_at'
+        ]
+        read_only_fields = [
+            'id', 'gross_amount', 'net_amount', 'pending_amount',
+            'payment_status', 'created_at', 'updated_at'
+        ]
+    
+    def get_payments(self, obj):
+        """Get recent payments for this wage summary"""
+        recent_payments = obj.payments.all()[:3]  # Latest 3 payments
+        return WagePaymentSerializer(recent_payments, many=True).data
+    
+    def get_payment_history_count(self, obj):
+        """Get total payment count"""
+        return obj.payments.count()
+    
+    def validate(self, data):
+        period_start = data.get('period_start')
+        period_end = data.get('period_end')
+        
+        if period_start and period_end and period_end < period_start:
+            raise serializers.ValidationError(
+                "Period end date must be after start date"
+            )
+        
+        paid_amount = data.get('paid_amount', 0)
+        if paid_amount < 0:
+            raise serializers.ValidationError("Paid amount cannot be negative")
+        
+        return data
+
+
+class WagePaymentSerializer(serializers.ModelSerializer):
+    employee_name = serializers.CharField(source='wage_summary.employee.name', read_only=True)
+    wage_summary_period = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = WagePayment
+        fields = [
+            'id', 'wage_summary', 'employee_name', 'wage_summary_period',
+            'payment_date', 'amount', 'payment_mode', 'reference_number',
+            'paid_by', 'remarks', 'receipt_url', 'created_at', 'updated_at'
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at']
+    
+    def get_wage_summary_period(self, obj):
+        """Get wage summary period info"""
+        return f"{obj.wage_summary.period_start} to {obj.wage_summary.period_end}"
+    
+    def validate_amount(self, value):
+        if value <= 0:
+            raise serializers.ValidationError("Payment amount must be greater than 0")
+        return value
+    
+    def validate_payment_date(self, value):
+        if not value:
+            raise serializers.ValidationError("Payment date is required")
+        
+        # Don't allow future payment dates
+        if value > date.today():
+            raise serializers.ValidationError("Payment date cannot be in the future")
+        
+        return value
+    
+    def validate(self, data):
+        wage_summary = data.get('wage_summary')
+        amount = data.get('amount', 0)
+        
+        if wage_summary:
+            # Check if payment amount doesn't exceed pending amount
+            remaining_amount = wage_summary.net_amount - wage_summary.paid_amount
+            
+            # If this is an update, add back the current payment amount
+            if self.instance:
+                remaining_amount += self.instance.amount
+            
+            if amount > remaining_amount:
+                raise serializers.ValidationError(
+                    f"Payment amount (₹{amount}) exceeds pending amount (₹{remaining_amount})"
+                )
+        
+        return data
+
+
+class AttendanceReportSerializer(serializers.Serializer):
+    """Serializer for attendance reports and statistics"""
+    
+    start_date = serializers.DateField()
+    end_date = serializers.DateField()
+    employee_id = serializers.IntegerField(required=False)
+    
+    def validate(self, data):
+        start_date = data.get('start_date')
+        end_date = data.get('end_date')
+        
+        if start_date and end_date and end_date < start_date:
+            raise serializers.ValidationError("End date must be after start date")
+        
+        # Limit report range to 1 year
+        from datetime import timedelta
+        if start_date and end_date:
+            if (end_date - start_date).days > 365:
+                raise serializers.ValidationError("Report range cannot exceed 1 year")
+        
+        return data
+
+
+class BulkAttendanceUpdateSerializer(serializers.Serializer):
+    """Serializer for bulk attendance updates"""
+    
+    attendance_updates = serializers.ListField(
+        child=serializers.DictField(),
+        min_length=1
+    )
+    
+    def validate_attendance_updates(self, value):
+        """Validate bulk attendance updates"""
+        for i, update_data in enumerate(value):
+            if 'attendance_id' not in update_data:
+                raise serializers.ValidationError(
+                    f"Update {i+1}: attendance_id is required"
+                )
+            
+            attendance_id = update_data['attendance_id']
+            
+            # Validate attendance exists
+            try:
+                EmployeeAttendance.objects.get(id=attendance_id)
+            except EmployeeAttendance.DoesNotExist:
+                raise serializers.ValidationError(
+                    f"Attendance with ID {attendance_id} does not exist"
+                )
+            
+            # Validate status if provided
+            if 'status' in update_data:
+                valid_statuses = ['present', 'absent', 'half_day', 'overtime', 'leave']
+                if update_data['status'] not in valid_statuses:
+                    raise serializers.ValidationError(
+                        f"Invalid status '{update_data['status']}' in update {i+1}"
+                    )
+        
+        return value
+
+
+
+
+
+
+
+
+
+
+
+
+
+
