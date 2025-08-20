@@ -2,6 +2,7 @@
 from django.urls import path
 from django.conf import settings
 from django.conf.urls.static import static
+from xe_farm.views.attendance.attendance_view import bulk_payment_details, bulk_payment_history, export_attendance, get_active_employees, get_attendance, mark_attendance, pay_wages, update_attendance, update_single_attendance, validate_employees_for_attendance, wage_summary, weekly_data
 from xe_farm.views.employee.emp_views import (save_employee_data,get_employee_list, get_employee_detail,  edit_employee_data, delete_employee, restore_employee, change_employee_status, toggle_employee_status)
 from xe_farm.views.merchant.merchant_views import (save_merchant_data, get_all_merchants, get_merchant_by_id, update_merchant_data, delete_merchant)
 from xe_farm.views.farm_segment.farm_segment_views import (save_farm_segment_data, get_all_farm_segments, get_farm_segment_by_id, update_farm_segment_data, delete_farm_segment)
@@ -14,12 +15,8 @@ from xe_farm.views.jobs.job_view import (
 )
 from xe_farm.views.expense.expense_view import (save_expense_data, get_expense_list, get_expense_detail, edit_expense_data, delete_expense, get_expense_statistics
 )   
-from xe_farm.views.wages.wages_view import (save_wage_data, get_wage_list, get_wage_detail, edit_wage_data, delete_wage, get_employee_wages, end_current_wage, get_wage_statistics)
-from xe_farm.views.attendance.attendance_view import (
-    check_attendance_exists, create_daily_attendance, create_wage_payment, delete_attendance, get_attendance_dashboard, get_attendance_list, get_attendance_detail, get_employee_attendance_history, get_monthly_attendance_report, get_wage_payments, get_wage_summary_detail, mark_attendance_processed,
-    update_employee_attendance, generate_wage_summary, get_wage_summaries,
-    bulk_update_attendance, export_attendance_report
-)
+from xe_farm.views.wages.wages_view import ( save_wage_data, get_wage_list, get_wage_detail, edit_wage_data, delete_wage, get_employee_wages, end_current_wage, get_wage_statistics)
+
 urlpatterns = [
     path('api/employees/', save_employee_data, name='save_employee_data'),
 
@@ -104,48 +101,35 @@ urlpatterns = [
     path('api/wages/<int:wage_id>/', get_wage_detail, name='get_wage_detail'),  # GET - Get wage details
     path('api/wages/<int:wage_id>/update/', edit_wage_data, name='edit_wage_data'),  # PUT - Update wage
     path('api/wages/<int:wage_id>/delete/', delete_wage, name='delete_wage'),  # DELETE - Delete wage
-    
     # Employee Wages
     path('api/employees/<int:employee_id>/wages/', get_employee_wages, name='get_employee_wages'),  # GET - Get all wages for employee
-    
     # Wage Management
     path('api/wages/<int:wage_id>/end/', end_current_wage, name='end_current_wage'),  # POST - End current wage
     
     # Statistics
     path('api/wages/statistics/', get_wage_statistics, name='get_wage_statistics'),  # GET - Wage statistics
+    
+    # Attendance Management
+    path('api/weekly-data/', weekly_data, name='weekly-data'),
+    path('api/mark-attendance/', mark_attendance, name='mark-attendance'),
+    path('api/attendance/<str:date_str>/', get_attendance, name='get-attendance'),
+    path('api/attendance/<str:date_str>/update/', update_attendance, name='update-attendance'),
+    path('api/update-single-attendance/', update_single_attendance, name='update-single-attendance'),
+    path('get-active-employees/', get_active_employees, name='get_active_employees'),
+    path('validate-employees/', validate_employees_for_attendance, name='validate_employees'),
+    # Wage Management
+    path('api/pay-wages/', pay_wages, name='pay-wages'),
+    path('api/wage-summary/',wage_summary, name='wage-summary'),
+    
+    # Export
+    path('api/export-attendance/', export_attendance, name='export-attendance'),
 
-    # Daily Attendance
-    path('api/attendance/create/', create_daily_attendance, name='create_daily_attendance'),
-    path('api/attendance/list/', get_attendance_list, name='get_attendance_list'),
-    path('api/attendance/<int:attendance_id>/', get_attendance_detail, name='get_attendance_detail'),
-    path('api/attendance/<int:attendance_id>/delete/', delete_attendance, name='delete_attendance'),
-    path('api/attendance/<int:attendance_id>/mark-processed/', mark_attendance_processed, name='mark_attendance_processed'),
-    path('api/attendance/check-exists/', check_attendance_exists, name='check_attendance_exists'),
     
-    # Employee Attendance
-    path('api/attendance/employee/<int:attendance_id>/update/', update_employee_attendance, name='update_employee_attendance'),
-    path('api/attendance/bulk-update/', bulk_update_attendance, name='bulk_update_attendance'),
-    path('api/employee/<int:employee_id>/attendance-history/', get_employee_attendance_history, name='get_employee_attendance_history'),
-    
-    # ============= WAGE MANAGEMENT =============
-    
-    # Wage Summaries
-    path('api/wages/summaries/generate/', generate_wage_summary, name='generate_wage_summary'),
-    path('api/wages/summaries/list/', get_wage_summaries, name='get_wage_summaries'),
-    path('api/wages/summaries/<int:summary_id>/', get_wage_summary_detail, name='get_wage_summary_detail'),
-    
-    # Wage Payments
-    path('api/wages/payments/create/', create_wage_payment, name='create_wage_payment'),
-    path('api/wages/payments/list/', get_wage_payments, name='get_wage_payments'),
-    
-    # ============= REPORTS & ANALYTICS =============
-    
-    # Dashboard
-    path('api/dashboard/attendance/', get_attendance_dashboard, name='get_attendance_dashboard'),
-    
-    # Reports
-    path('api/reports/monthly-attendance/', get_monthly_attendance_report, name='get_monthly_attendance_report'),
-    path('api/reports/attendance/export/', export_attendance_report, name='export_attendance_report'),
+    # bulk payment system
+    path('bulk-payment-history/', bulk_payment_history, name='bulk_payment_history'),
+    path('bulk-payment-details/<int:payment_id>/', bulk_payment_details, name='bulk_payment_details'),
+
+   
 
 ]
 if settings.DEBUG:

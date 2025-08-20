@@ -73,9 +73,9 @@ WSGI_APPLICATION = 'xeApp.wsgi.application'
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.mysql',
-        'NAME': 'farm_management',
-        'USER': 'root',
-        'PASSWORD':'',
+        'NAME': 'uaackwis_farm_agrobot',
+        'USER': 'uaackwis_farm_agrobot',
+        'PASSWORD':'farmAgrobot@123',
         'HOST': '127.0.0.1',
         'PORT': '3306',
     }
