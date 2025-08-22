@@ -386,7 +386,7 @@ class AttendanceRecord(models.Model):
     date = models.DateField(unique=True, verbose_name="Attendance Date")
     
     # JSON field to store array of employee attendance records
-    # Structure: [{"employee_id": "1", "employee_name": "John", "status": 1, "wage_amount": 500.00}, ...]
+
     attendance_data = models.JSONField(
         default=list,
         verbose_name="Attendance Data",
@@ -845,6 +845,8 @@ class WagePaymentTransaction(models.Model):
         on_delete=models.CASCADE,
         related_name='payment_transactions'
     )
+    employee_id = models.CharField(max_length=50,default=1)  # Store employee ID for this transaction
+    employee_name = models.CharField(max_length=255, default="Unknown")  # Store name for easy reference
     transaction_type = models.CharField(
         max_length=20,
         choices=TRANSACTION_TYPE_CHOICES,
@@ -875,7 +877,7 @@ class WagePaymentTransaction(models.Model):
         verbose_name_plural = 'Wage Payment Transactions'
     
     def __str__(self):
-        return f"{self.wage_payment.employee_name} - {self.get_transaction_type_display()} ₹{self.amount}"
+        return f"{self.employee_name} - {self.get_transaction_type_display()} ₹{self.amount}"
 
 
 class AttendanceWeeklySummary(models.Model):

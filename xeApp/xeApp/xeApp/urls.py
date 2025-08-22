@@ -2,7 +2,8 @@
 from django.urls import path
 from django.conf import settings
 from django.conf.urls.static import static
-from xe_farm.views.attendance.attendance_view import bulk_payment_details, bulk_payment_history, export_attendance, get_active_employees, get_attendance, mark_attendance, pay_wages, update_attendance, update_single_attendance, validate_employees_for_attendance, wage_summary, weekly_data
+from xe_farm.views.attendance.attendance_view import wage_payment_details, wage_payment_history, export_attendance, get_active_employees, get_attendance, mark_attendance, pay_wages, update_attendance, update_single_attendance, validate_employees_for_attendance, wage_summary, weekly_data
+from xe_farm.views.attendance.pdf_wage_report_view import download_employee_wage_detail_pdf, download_payroll_summary_pdf, download_weekly_wage_summary_pdf, generate_wage_range_pdf, generate_weekly_wage_pdf
 from xe_farm.views.employee.emp_views import (save_employee_data,get_employee_list, get_employee_detail,  edit_employee_data, delete_employee, restore_employee, change_employee_status, toggle_employee_status)
 from xe_farm.views.merchant.merchant_views import (save_merchant_data, get_all_merchants, get_merchant_by_id, update_merchant_data, delete_merchant)
 from xe_farm.views.farm_segment.farm_segment_views import (save_farm_segment_data, get_all_farm_segments, get_farm_segment_by_id, update_farm_segment_data, delete_farm_segment)
@@ -126,9 +127,16 @@ urlpatterns = [
 
     
     # bulk payment system
-    path('bulk-payment-history/', bulk_payment_history, name='bulk_payment_history'),
-    path('bulk-payment-details/<int:payment_id>/', bulk_payment_details, name='bulk_payment_details'),
+    path('bulk-payment-history/', wage_payment_history, name='wage_payment_history'),
+    path('bulk-payment-details/<int:payment_id>/', wage_payment_details, name='wage_payment_details'),
 
+    # PDF wage reports
+    path('api/wages/pdf/weekly/',generate_weekly_wage_pdf, name='weekly_wage_pdf'),
+    path('api/wages/pdf/range/', generate_wage_range_pdf, name='wage_range_pdf'),
+    path('api/wages/pdf/summary/', download_weekly_wage_summary_pdf, name='wage_summary_pdf'),
+    path('api/wages/pdf/employee-detail/', download_employee_wage_detail_pdf, name='employee_wage_detail_pdf'),
+    # path('api/attendance/pdf/register/', download_attendance_register_pdf, name='attendance_register_pdf'),
+    path('api/payroll/pdf/summary/', download_payroll_summary_pdf, name='payroll_summary_pdf'),
    
 
 ]

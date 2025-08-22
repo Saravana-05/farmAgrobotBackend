@@ -119,17 +119,28 @@ def update_single_attendance(request):
             status=status.HTTP_400_BAD_REQUEST
         )
     
-    # Check if wages are already paid for this week
+    # FIXED: Check if wages are already paid for this week
+    # Remove invalid employee filter and check JSON data instead
     week_start = get_monday_of_week(attendance_date)
-    wage_payment = WeeklyWagePayment.objects.filter(
-        employee=employee,
+    wage_records = WeeklyWagePayment.objects.filter(
         week_start_date=week_start,
         payment_status='paid'
-    ).first()
+    )
     
-    if wage_payment:
+    # Check if this specific employee is already fully paid
+    employee_wages_paid = False
+    for record in wage_records:
+        for emp_wage in record.employee_wages:
+            if (emp_wage.get('employee_id') == str(employee_id) and 
+                emp_wage.get('payment_status') == 'paid'):
+                employee_wages_paid = True
+                break
+        if employee_wages_paid:
+            break
+    
+    if employee_wages_paid:
         return Response(
-            {'error': 'Cannot update attendance. Wages already paid for this week.'}, 
+            {'error': 'Cannot update attendance. Wages already paid for this employee for this week.'}, 
             status=status.HTTP_400_BAD_REQUEST
         )
     
@@ -156,7 +167,6 @@ def update_single_attendance(request):
         'date': attendance_date.isoformat(),
         'status': attendance_status
     })
-
 
 @api_view(['GET'])
 def get_attendance(request, date_str):
@@ -254,7 +264,7 @@ def validate_employees_for_attendance(request):
     
 @api_view(['POST'])
 def pay_wages(request):
-    """Pay wages to employees - handles both bulk and individual payments"""
+    """Pay wages to employees - handles both bulk and individual payments with optimized structure"""
     try:
         pay_all = request.data.get('pay_all', False)
         week_start = request.data.get('week_start')
@@ -274,10 +284,8 @@ def pay_wages(request):
             )
         
         if pay_all:
-            # Pay all employees as bulk payment (single record with employee array)
-            return _pay_all_wages_bulk(request, week_start_date)
+            return _pay_all_wages(request, week_start_date)
         else:
-            # Pay individual employee (separate individual records)
             return _pay_individual_wage(request, week_start_date)
             
     except Exception as e:
@@ -288,102 +296,25 @@ def pay_wages(request):
         )
 
 
-def _pay_all_wages_bulk(request, week_start_date):
-    """Pay wages to all employees as a single bulk payment record and create expense entry"""
+def _pay_all_wages(request, week_start_date):
+    """Pay all wages using optimized WeeklyWagePayment structure"""
     try:
-        # Check if bulk payment already exists for this week
-        existing_bulk_payment = BulkWagePayment.objects.filter(
+        # Check if wage record already exists
+        existing_wage_record = WeeklyWagePayment.objects.filter(
             week_start_date=week_start_date
         ).first()
         
-        if existing_bulk_payment:
+        if existing_wage_record and existing_wage_record.payment_status == 'paid':
             return Response(
-                {'error': 'Bulk payment already processed for this week'}, 
+                {'error': 'Wages already fully paid for this week'}, 
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        week_dates = get_week_dates(week_start_date)
-        week_end_date = week_dates[-1]
-        
-        # Get all active employees
-        employees = Employee.objects.filter(status=True)
-        
-        # Get attendance records for the week
-        attendance_records = AttendanceRecord.objects.filter(
-            date__in=week_dates
-        )
-        
-        # Create attendance lookup
-        attendance_lookup = {record.date: record.attendance_data for record in attendance_records}
-        
-        # Prepare employee payment data as array
-        employee_payments = []
-        total_amount = Decimal('0')
-        
-        for employee in employees:
-            emp_id = str(employee.id)
-            current_wage = Wage.get_current_wage(employee)
-            daily_wage = current_wage.amount if current_wage else Decimal('0')
-            
-            if daily_wage == 0:
-                continue  # Skip employees without wage rates
-            
-            # Calculate attendance for this employee
-            present_days = 0
-            half_days = 0
-            absent_days = 0
-            late_days = 0
-            attendance_details = {}
-            
-            for week_date in week_dates:
-                date_str = week_date.isoformat()
-                employee_status = None
-                
-                if week_date in attendance_lookup:
-                    # Find this employee's status
-                    for emp_data in attendance_lookup[week_date]:
-                        if str(emp_data.get('employee_id')) == emp_id:
-                            employee_status = emp_data.get('status')
-                            break
-                
-                attendance_details[date_str] = employee_status
-                
-                # Count days by status
-                if employee_status == 1:  # Present
-                    present_days += 1
-                elif employee_status == 2:  # Half day
-                    half_days += 1
-                elif employee_status == 3:  # Late (treat as present)
-                    late_days += 1
-                    present_days += 1  # Count late as present for wage calculation
-                else:  # Absent or no status
-                    absent_days += 1
-            
-            # Calculate total wages
-            total_wages = (present_days * daily_wage) + (half_days * daily_wage / 2)
-            
-            # Store employee data in the format you want
-            employee_payment_data = {
-                'employee_id': emp_id,
-                'employee_name': employee.name,
-                'present_days': present_days,
-                'half_days': half_days,
-                'absent_days': absent_days,
-                'late_days': late_days,
-                'daily_wage': float(daily_wage),
-                'total_wages': float(total_wages),
-                'attendance_details': attendance_details,
-                'payment_date': timezone.now().isoformat()
-            }
-            
-            employee_payments.append(employee_payment_data)
-            total_amount += total_wages
-        
-        if not employee_payments:
-            return Response(
-                {'error': 'No employees found with valid wage rates'}, 
-                status=status.HTTP_400_BAD_REQUEST
-            )
+        # Generate or get existing wage record
+        if not existing_wage_record:
+            wage_record = WeeklyWagePayment.generate_weekly_wage_record(week_start_date)
+        else:
+            wage_record = existing_wage_record
         
         # Get payment details from request
         payment_mode = request.data.get('payment_mode', 'Cash')
@@ -391,65 +322,58 @@ def _pay_all_wages_bulk(request, week_start_date):
         remarks = request.data.get('remarks', f'Bulk wage payment for week {week_start_date}')
         
         with transaction.atomic():
-            # Create bulk payment record - stores employee_payments as a single JSON array
-            bulk_payment = BulkWagePayment.create_bulk_payment(
-                week_start_date=week_start_date,
-                employee_data=employee_payments,  # This is stored as JSON array
+            # Pay all pending wages
+            total_payment = wage_record.make_bulk_payment(
                 payment_mode=payment_mode,
-                payment_reference=payment_reference,
-                remarks=remarks,
-                paid_by=request.user if request.user.is_authenticated else None
+                reference=payment_reference,
+                remarks=remarks
             )
             
-            # Create expense record for the bulk payment - FIXED TO MATCH YOUR MODEL
-            expense = Expense.objects.create(
-                expense_name=f'Bulk Wages - Week {week_start_date}',
-                date=timezone.now().date(),
-                category='Weekly Wages',  # Using your model's category choice
-                description=f'Bulk wage payment for week {week_start_date} to {week_end_date} ({len(employee_payments)} employees)',
-                amount=total_amount,
-                spent_by=request.user.username if request.user.is_authenticated else 'System',
-                mode_of_payment=payment_mode,  # Using your model's field name
-                # expense_image_url can be left as default (blank/null)
-            )
+            if total_payment == 0:
+                return Response(
+                    {'error': 'No pending payments found'}, 
+                    status=status.HTTP_400_BAD_REQUEST
+                )
         
         return Response({
-            'message': f'Bulk wage payment processed successfully for {len(employee_payments)} employees',
-            'bulk_payment_id': bulk_payment.id,
-            'expense_id': expense.id,  # Include expense ID in response
-            'total_amount_paid': float(total_amount),
-            'total_employees': len(employee_payments),
-            'week_start_date': week_start_date.isoformat(),
-            'week_end_date': week_end_date.isoformat(),
+            'message': f'Bulk wage payment processed successfully for {wage_record.total_employees} employees',
+            'wage_record_id': wage_record.id,
+            'expense_id': wage_record.expense_entry.id if wage_record.expense_entry else None,
+            'total_amount_paid': float(total_payment),
+            'total_employees': wage_record.total_employees,
+            'week_start_date': wage_record.week_start_date.isoformat(),
+            'week_end_date': wage_record.week_end_date.isoformat(),
             'payment_mode': payment_mode,
             'payment_reference': payment_reference,
-            'employee_data_storage': 'single_record_with_array',
-            'expense_recorded': True,
-            'expense_category': 'Weekly Wages'
+            'data_structure': 'optimized_single_record_with_json_array',
+            'expense_recorded': wage_record.expense_entry is not None
         })
         
     except Exception as e:
-        print(f"Error in _pay_all_wages_bulk: {str(e)}")
+        print(f"Error in _pay_all_wages: {str(e)}")
         return Response(
             {'error': f'Bulk payment failed: {str(e)}'}, 
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
 
 def _pay_individual_wage(request, week_start_date):
-    """Pay wages to individual employee - FIXED VERSION WITHOUT DUPLICATE EXPENSES"""
+    """Pay individual employee wage with comprehensive debugging"""
     try:
         serializer = PayWageSerializer(data=request.data)
         
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
         
-        employee_id = serializer.validated_data['employee_id']
-        amount = serializer.validated_data['amount']
+        employee_id = str(serializer.validated_data['employee_id'])
+        amount = Decimal(str(serializer.validated_data['amount']))
         payment_mode = serializer.validated_data['payment_mode']
         payment_reference = serializer.validated_data.get('payment_reference', '')
         remarks = serializer.validated_data.get('remarks', '')
         
-        print(f"Processing individual payment: Employee={employee_id}, Amount={amount}")
+        print(f"=== PAYMENT DEBUG START ===")
+        print(f"Employee ID: {employee_id}")
+        print(f"Amount: {amount}")
+        print(f"Week Start Date: {week_start_date}")
         
         try:
             employee = Employee.objects.get(id=employee_id)
@@ -459,75 +383,196 @@ def _pay_individual_wage(request, week_start_date):
                 status=status.HTTP_404_NOT_FOUND
             )
         
-        # Get or create weekly wage payment (individual record)
+        # Check existing payments
+        existing_wage_records = WeeklyWagePayment.objects.filter(
+            week_start_date=week_start_date,
+            payment_status='paid'
+        )
+        
+        employee_already_paid = False
+        for record in existing_wage_records:
+            for emp_wage in record.employee_wages:
+                if emp_wage.get('employee_id') == employee_id and emp_wage.get('payment_status') == 'paid':
+                    employee_already_paid = True
+                    break
+            if employee_already_paid:
+                break
+        
+        if employee_already_paid:
+            return Response(
+                {'error': f'Wages already fully paid for employee {employee.name} for this week.'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Get or create wage record BEFORE transaction
+        wage_record = WeeklyWagePayment.objects.filter(
+            week_start_date=week_start_date
+        ).first()
+        
+        if not wage_record:
+            print("Creating new wage record...")
+            wage_record = WeeklyWagePayment.generate_weekly_wage_record(week_start_date)
+            print(f"New wage record created: ID = {wage_record.id}")
+        else:
+            print(f"Using existing wage record: ID = {wage_record.id}")
+        
+        # Print BEFORE state
+        emp_data_before = wage_record.get_employee_wage_data(employee_id)
+        print(f"BEFORE UPDATE - Employee data: {emp_data_before}")
+        
         with transaction.atomic():
-            try:
-                wage_payment = WeeklyWagePayment.objects.get(
-                    employee=employee,
-                    week_start_date=week_start_date
-                )
-                print(f"Found existing payment record: Status={wage_payment.payment_status}, Remaining={wage_payment.remaining_amount}")
-            except WeeklyWagePayment.DoesNotExist:
-                # Only generate payments if none exist for this employee and week
-                print(f"No payment record found, generating for employee {employee.name}")
-                payments = WeeklyWagePayment.generate_weekly_payments(week_start_date)
-                print(f"Generated {len(payments)} payment records for week {week_start_date}")
-                
-                # Get the payment record that was just created
-                wage_payment = WeeklyWagePayment.objects.get(
-                    employee=employee,
-                    week_start_date=week_start_date
-                )
+            print("=== STARTING ATOMIC TRANSACTION ===")
             
-            if wage_payment.remaining_amount < amount:
+            try:
+                # Call the update method
+                print("Calling update_employee_payment...")
+                wage_record.update_employee_payment(
+                    employee_id=employee_id,
+                    payment_amount=amount,
+                    payment_mode=payment_mode,
+                    reference=payment_reference,
+                    remarks=remarks
+                )
+                print("update_employee_payment completed successfully")
+                
+                # Force a database refresh to ensure we get the latest data
+                wage_record.refresh_from_db()
+                print("Record refreshed from database")
+                
+            except ValueError as e:
+                print(f"ValueError in update_employee_payment: {str(e)}")
                 return Response(
-                    {'error': f'Payment amount ({amount}) exceeds remaining balance ({wage_payment.remaining_amount})'}, 
+                    {'error': str(e)}, 
                     status=status.HTTP_400_BAD_REQUEST
                 )
+            except Exception as e:
+                print(f"Unexpected error in payment update: {str(e)}")
+                import traceback
+                traceback.print_exc()
+                raise
             
-            # Process the payment - this already handles the payment tracking
-            old_status = wage_payment.payment_status
-            old_paid = wage_payment.paid_amount
-            
-            wage_payment.make_payment(
-                amount, 
-                payment_mode=payment_mode,
-                reference=payment_reference,
-                remarks=remarks
-            )
-            
-            print(f"Payment processed successfully:")
-            print(f"   Status: {old_status} -> {wage_payment.payment_status}")
-            print(f"   Paid: {old_paid} -> {wage_payment.paid_amount}")
-            print(f"   Remaining: {wage_payment.remaining_amount}")
-            
-            # REMOVED: No longer creating separate Expense record
-            # The WeeklyWagePayment record is sufficient for tracking individual payments
+        print("=== TRANSACTION COMMITTED ===")
         
-        return Response({
+        # CRITICAL: Verify the data was actually saved by fetching fresh from DB
+        print("=== VERIFYING DATABASE STATE ===")
+        fresh_record = WeeklyWagePayment.objects.get(id=wage_record.id)
+        emp_data_after = fresh_record.get_employee_wage_data(employee_id)
+        print(f"AFTER UPDATE - Fresh from DB: {emp_data_after}")
+        
+        # Additional verification - check if the JSON field was actually updated
+        print(f"Record total_paid_amount: {fresh_record.total_paid_amount}")
+        print(f"Record payment_status: {fresh_record.payment_status}")
+        
+        # Double-check by counting paid employees
+        paid_employees = [e for e in fresh_record.employee_wages if e.get('payment_status') in ['paid', 'partial']]
+        print(f"Employees with payments: {len(paid_employees)}")
+        
+        # Create transaction record (simplified)
+        try:
+            print("Creating transaction record...")
+            from ...models import WagePaymentTransaction
+            
+            # Create with minimal required fields
+            transaction_record = WagePaymentTransaction.objects.create(
+                wage_payment=fresh_record,
+                transaction_type='payment',
+                amount=amount,
+                payment_mode=payment_mode,
+                remarks=f'Payment to {employee.name}' + (f': {remarks}' if remarks else ''),
+            )
+            print(f"Transaction record created successfully: ID = {transaction_record.id}")
+            
+        except Exception as transaction_error:
+            print(f"Transaction record creation failed (non-critical): {transaction_error}")
+            # Don't fail the payment
+            pass
+        
+        # Prepare response with fresh data
+        response_data = {
+            'success': True,
             'message': 'Individual payment processed successfully',
-            'employee_id': str(employee.id),
+            'employee_id': employee_id,
             'employee_name': employee.name,
             'amount_paid': float(amount),
-            'total_paid': float(wage_payment.paid_amount),
-            'remaining_amount': float(wage_payment.remaining_amount),
-            'payment_status': wage_payment.payment_status,
+            'total_paid': emp_data_after.get('paid_amount', 0) if emp_data_after else 0,
+            'remaining_amount': emp_data_after.get('remaining_amount', 0) if emp_data_after else 0,
+            'payment_status': emp_data_after.get('payment_status', 'pending') if emp_data_after else 'pending',
             'week_start_date': week_start_date.isoformat(),
-            'note': 'Payment tracked in WeeklyWagePayment record only'
-        })
+            'wage_record_id': fresh_record.id,
+            # Add debugging info
+            'debug_info': {
+                'before_paid_amount': emp_data_before.get('paid_amount', 0) if emp_data_before else 0,
+                'after_paid_amount': emp_data_after.get('paid_amount', 0) if emp_data_after else 0,
+                'record_total_paid': float(fresh_record.total_paid_amount),
+                'data_updated': emp_data_before != emp_data_after if emp_data_before and emp_data_after else False
+            }
+        }
+        
+        print(f"Final response data: {response_data}")
+        print("=== PAYMENT DEBUG END ===")
+        
+        return Response(response_data)
         
     except Exception as e:
-        print(f"Error in _pay_individual_wage: {str(e)}")
+        print(f"CRITICAL ERROR in _pay_individual_wage: {str(e)}")
         import traceback
         traceback.print_exc()
         return Response(
-            {'error': f'Individual payment failed: {str(e)}'}, 
+            {'success': False, 'error': f'Individual payment failed: {str(e)}'}, 
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
+
+
+# Create a separate API endpoint to verify payment data
+@api_view(['GET'])
+def verify_payment_data(request):
+    """Debug endpoint to verify payment data in database"""
+    week_start = request.GET.get('week_start')
+    employee_id = request.GET.get('employee_id')
+    
+    if not week_start:
+        return Response({'error': 'week_start parameter required'})
+    
+    try:
+        week_start_date = datetime.strptime(week_start, '%Y-%m-%d').date()
         
+        wage_record = WeeklyWagePayment.objects.filter(
+            week_start_date=week_start_date
+        ).first()
+        
+        if not wage_record:
+            return Response({'error': 'No wage record found for this week'})
+        
+        response_data = {
+            'wage_record_id': wage_record.id,
+            'total_employees': wage_record.total_employees,
+            'total_paid_amount': float(wage_record.total_paid_amount),
+            'payment_status': wage_record.payment_status,
+            'employee_count': len(wage_record.employee_wages) if wage_record.employee_wages else 0,
+        }
+        
+        if employee_id:
+            emp_data = wage_record.get_employee_wage_data(employee_id)
+            response_data['employee_data'] = emp_data
+        else:
+            # Return all employee payment statuses
+            response_data['all_employees'] = [
+                {
+                    'employee_id': e.get('employee_id'),
+                    'employee_name': e.get('employee_name'),
+                    'paid_amount': e.get('paid_amount', 0),
+                    'payment_status': e.get('payment_status', 'pending')
+                } for e in wage_record.employee_wages
+            ]
+        
+        return Response(response_data)
+        
+    except Exception as e:
+        return Response({'error': str(e)}, status=500)
+
 @api_view(['GET'])
 def weekly_data(request):
-    """Get weekly attendance data for all employees"""
+    """Get weekly attendance data using optimized structure"""
     try:
         week_start = request.query_params.get('week_start')
         
@@ -540,21 +585,20 @@ def weekly_data(request):
                     status=status.HTTP_400_BAD_REQUEST
                 )
         else:
-            # Default to current week's Monday
             week_start_date = get_monday_of_week(date.today())
         
         week_dates = get_week_dates(week_start_date)
         week_end_date = week_dates[-1]
         
-        # Check if bulk payment exists for this week (efficient single record)
-        bulk_payment = BulkWagePayment.objects.filter(
+        # Check for optimized wage payment record
+        wage_record = WeeklyWagePayment.objects.filter(
             week_start_date=week_start_date
         ).first()
         
-        # Check for individual payments (separate records per employee)
-        wage_payments = WeeklyWagePayment.objects.filter(
+        # Check for old bulk payment (for backward compatibility)
+        bulk_payment = BulkWagePayment.objects.filter(
             week_start_date=week_start_date
-        ).select_related('employee')
+        ).first()
         
         # Get all active employees
         employees = Employee.objects.filter(status=True)
@@ -570,7 +614,7 @@ def weekly_data(request):
         # Build daily counts
         daily_counts = defaultdict(int)
         for record_date, attendance_data in attendance_lookup.items():
-            if attendance_data:  # Check if attendance_data is not None
+            if attendance_data:
                 present_count = len([emp for emp in attendance_data if emp.get('status') == 1])
                 daily_counts[record_date.isoformat()] = present_count
         
@@ -578,10 +622,60 @@ def weekly_data(request):
         employees_data = []
         total_wages = 0
         wages_paid = False
-        payment_type = 'none'  # 'bulk', 'individual', or 'none'
+        payment_type = 'none'
         
-        # PRIORITY 1: Check for bulk payment first
-        if bulk_payment:
+        # PRIORITY 1: Use optimized WeeklyWagePayment record
+        if wage_record:
+            print(f"Using OPTIMIZED wage record for week {week_start_date}")
+            wages_paid = wage_record.payment_status in ['Fully Paid', 'Partial']
+            payment_type = 'optimized'
+            
+            # Create employee lookup from wage record
+            wage_employee_lookup = {emp['employee_id']: emp for emp in wage_record.employee_wages}
+            
+            for employee in employees:
+                emp_id = str(employee.id)
+                current_wage = Wage.get_current_wage(employee)
+                daily_wage = current_wage.amount if current_wage else Decimal('0')
+                
+                # Get data from wage record if exists
+                wage_emp_data = wage_employee_lookup.get(emp_id)
+                
+                if wage_emp_data:
+                    # Use data from wage record
+                    employee_attendance = wage_emp_data.get('attendance_details', {})
+                    present_days = wage_emp_data.get('present_days', 0)
+                    half_days = wage_emp_data.get('half_days', 0)
+                    total_wage = Decimal(str(wage_emp_data.get('net_amount', 0)))
+                    payment_status = wage_emp_data.get('payment_status', 'pending')
+                    partial_payment = Decimal(str(wage_emp_data.get('paid_amount', 0)))
+                    remaining_amount = Decimal(str(wage_emp_data.get('remaining_amount', 0)))
+                else:
+                    # Employee not in wage record - build from attendance
+                    employee_attendance, present_days, half_days, total_wage = _build_employee_attendance_data(
+                        emp_id, week_dates, attendance_lookup, daily_wage
+                    )
+                    payment_status = 'pending'
+                    partial_payment = Decimal('0')
+                    remaining_amount = total_wage
+                
+                employees_data.append({
+                    'employee_id': emp_id,
+                    'employee_name': employee.name,
+                    'daily_wage': float(daily_wage),
+                    'attendance': employee_attendance,
+                    'present_days': present_days,
+                    'half_days': half_days,
+                    'total_wages': float(total_wage),
+                    'payment_status': payment_status,
+                    'partial_payment': float(partial_payment),
+                    'remaining_amount': float(remaining_amount)
+                })
+                
+                total_wages += float(total_wage)
+        
+        # PRIORITY 2: Check for old bulk payment (backward compatibility)
+        elif bulk_payment:
             print(f"Using BULK payment data for week {week_start_date}")
             wages_paid = True
             payment_type = 'bulk'
@@ -611,69 +705,6 @@ def weekly_data(request):
                     employee_attendance, present_days, half_days, total_wage = _build_employee_attendance_data(
                         emp_id, week_dates, attendance_lookup, daily_wage
                     )
-                    payment_status = 'pending'
-                    partial_payment = Decimal('0')
-                    remaining_amount = total_wage
-                
-                employees_data.append({
-                    'employee_id': emp_id,
-                    'employee_name': employee.name,
-                    'daily_wage': float(daily_wage),
-                    'attendance': employee_attendance,
-                    'present_days': present_days,
-                    'half_days': half_days,
-                    'total_wages': float(total_wage),
-                    'payment_status': payment_status,
-                    'partial_payment': float(partial_payment),
-                    'remaining_amount': float(remaining_amount)
-                })
-                
-                total_wages += float(total_wage)
-        
-        # PRIORITY 2: Check for individual payments
-        elif wage_payments.exists():
-            print(f"Using INDIVIDUAL payment data for week {week_start_date}")
-            payment_type = 'individual'
-            
-            # Create payment lookup
-            payment_lookup = {wp.employee.id: wp for wp in wage_payments}
-            
-            # Check if all wages are paid
-            wages_paid = all(wp.payment_status == 'paid' for wp in wage_payments)
-            
-            for employee in employees:
-                emp_id = str(employee.id)
-                current_wage = Wage.get_current_wage(employee)
-                daily_wage = current_wage.amount if current_wage else Decimal('0')
-                
-                # Get individual payment information
-                payment = payment_lookup.get(employee.id)
-                
-                if payment:
-                    # CRITICAL FIX: Use payment record data when available
-                    print(f"Found payment record for {employee.name}: Status={payment.payment_status}, Paid={payment.paid_amount}")
-                    
-                    # Use stored attendance data from payment record if available
-                    # If your WeeklyWagePayment model stores attendance, use it
-                    # Otherwise, rebuild from attendance records
-                    employee_attendance, present_days, half_days, calculated_total_wage = _build_employee_attendance_data(
-                        emp_id, week_dates, attendance_lookup, daily_wage
-                    )
-                    
-                    # Use payment record for payment information
-                    payment_status = payment.payment_status
-                    partial_payment = payment.paid_amount
-                    remaining_amount = payment.remaining_amount
-                    
-                    # Use the higher of calculated or payment record total (in case of discrepancies)
-                    total_wage = max(calculated_total_wage, payment.gross_amount)
-                    
-                else:
-                    # No payment record - build from attendance
-                    employee_attendance, present_days, half_days, total_wage = _build_employee_attendance_data(
-                        emp_id, week_dates, attendance_lookup, daily_wage
-                    )
-                    
                     payment_status = 'pending'
                     partial_payment = Decimal('0')
                     remaining_amount = total_wage
@@ -735,15 +766,29 @@ def weekly_data(request):
             'weekly_employee_count': len(employees_data)
         }
         
-        # Add bulk payment info if exists
-        if bulk_payment:
+        # Add optimized wage record info if exists
+        if wage_record:
+            response_data['wage_record_info'] = {
+                'id': wage_record.id,
+                'payment_status': wage_record.payment_status,
+                'total_employees': wage_record.total_employees,
+                'total_net_amount': float(wage_record.total_net_amount),
+                'total_paid_amount': float(wage_record.total_paid_amount),
+                'total_remaining_amount': float(wage_record.total_remaining_amount),
+                'expense_entry_id': wage_record.expense_entry.id if wage_record.expense_entry else None,
+                'data_structure': 'optimized_json_array'
+            }
+        
+        # Add bulk payment info if exists (for backward compatibility)
+        elif bulk_payment:
             response_data['bulk_payment_info'] = {
                 'id': bulk_payment.id,
                 'payment_date': bulk_payment.payment_date.isoformat(),
                 'payment_mode': bulk_payment.payment_mode,
                 'payment_reference': bulk_payment.payment_reference,
                 'total_amount': float(bulk_payment.total_amount),
-                'employees_in_single_record': len(bulk_payment.employee_payments)
+                'employees_in_single_record': len(bulk_payment.employee_payments),
+                'data_structure': 'legacy_bulk_payment'
             }
         
         print(f"Weekly data response built successfully: {len(employees_data)} employees, payment_type={payment_type}")
@@ -757,7 +802,9 @@ def weekly_data(request):
             {'error': f'Failed to fetch weekly data: {str(e)}'}, 
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
+
         
+
 def _build_employee_attendance_data(emp_id, week_dates, attendance_lookup, daily_wage):
     """Helper function to build employee attendance data from attendance records"""
     employee_attendance = {}
@@ -792,13 +839,15 @@ def _build_employee_attendance_data(emp_id, week_dates, attendance_lookup, daily
     
     return employee_attendance, present_days, half_days, total_wage
 
+
+
 @api_view(['GET'])
-def bulk_payment_history(request):
-    """Get bulk payment history"""
+def wage_payment_history(request):
+    """Get optimized wage payment history"""
     from_date = request.query_params.get('from_date')
     to_date = request.query_params.get('to_date')
     
-    queryset = BulkWagePayment.objects.all()
+    queryset = WeeklyWagePayment.objects.all()
     
     if from_date:
         try:
@@ -814,49 +863,74 @@ def bulk_payment_history(request):
         except ValueError:
             return Response({'error': 'Invalid to_date format'}, status=400)
     
-    bulk_payments = queryset.order_by('-payment_date')
+    wage_records = queryset.order_by('-week_start_date')
     
     payment_history = []
-    for payment in bulk_payments:
+    for record in wage_records:
         payment_history.append({
-            'id': payment.id,
-            'week_start_date': payment.week_start_date.isoformat(),
-            'week_end_date': payment.week_end_date.isoformat(),
-            'payment_date': payment.payment_date.isoformat(),
-            'total_employees': payment.total_employees,
-            'total_amount': float(payment.total_amount),
-            'payment_mode': payment.payment_mode,
-            'payment_reference': payment.payment_reference,
-            'remarks': payment.remarks,
-            'paid_by': payment.paid_by.username if payment.paid_by else None
+            'id': record.id,
+            'week_start_date': record.week_start_date.isoformat(),
+            'week_end_date': record.week_end_date.isoformat(),
+            'total_employees': record.total_employees,
+            'total_gross_amount': float(record.total_gross_amount),
+            'total_net_amount': float(record.total_net_amount),
+            'total_paid_amount': float(record.total_paid_amount),
+            'total_remaining_amount': float(record.total_remaining_amount),
+            'payment_status': record.payment_status,
+            'expense_entry_id': record.expense_entry.id if record.expense_entry else None,
+            'created_at': record.created_at.isoformat(),
+            'updated_at': record.updated_at.isoformat(),
+            'data_structure': 'optimized_json_array'
         })
     
     return Response({
-        'bulk_payments': payment_history,
+        'wage_payment_records': payment_history,
         'total_records': len(payment_history)
     })
 
 
+
 @api_view(['GET'])
-def bulk_payment_details(request, payment_id):
-    """Get detailed view of a specific bulk payment"""
+def wage_payment_details(request, record_id):
+    """Get detailed view of a specific optimized wage payment record"""
     try:
-        bulk_payment = BulkWagePayment.objects.get(id=payment_id)
-    except BulkWagePayment.DoesNotExist:
-        return Response({'error': 'Bulk payment not found'}, status=404)
+        wage_record = WeeklyWagePayment.objects.get(id=record_id)
+    except WeeklyWagePayment.DoesNotExist:
+        return Response({'error': 'Wage payment record not found'}, status=404)
+    
+    # Get payment transactions for audit trail
+    transactions = wage_record.payment_transactions.all().order_by('-transaction_date')
+    transaction_data = []
+    for transaction in transactions:
+        transaction_data.append({
+            'id': transaction.id,
+            'employee_id': transaction.employee_id,
+            'employee_name': transaction.employee_name,
+            'transaction_type': transaction.transaction_type,
+            'amount': float(transaction.amount),
+            'payment_mode': transaction.payment_mode,
+            'reference_number': transaction.reference_number,
+            'transaction_date': transaction.transaction_date.isoformat(),
+            'remarks': transaction.remarks
+        })
     
     return Response({
-        'id': bulk_payment.id,
-        'week_start_date': bulk_payment.week_start_date.isoformat(),
-        'week_end_date': bulk_payment.week_end_date.isoformat(),
-        'payment_date': bulk_payment.payment_date.isoformat(),
-        'total_employees': bulk_payment.total_employees,
-        'total_amount': float(bulk_payment.total_amount),
-        'payment_mode': bulk_payment.payment_mode,
-        'payment_reference': bulk_payment.payment_reference,
-        'remarks': bulk_payment.remarks,
-        'paid_by': bulk_payment.paid_by.username if bulk_payment.paid_by else None,
-        'employee_payments': bulk_payment.employee_payments  # Full employee payment details
+        'id': wage_record.id,
+        'week_start_date': wage_record.week_start_date.isoformat(),
+        'week_end_date': wage_record.week_end_date.isoformat(),
+        'total_employees': wage_record.total_employees,
+        'total_gross_amount': float(wage_record.total_gross_amount),
+        'total_net_amount': float(wage_record.total_net_amount),
+        'total_paid_amount': float(wage_record.total_paid_amount),
+        'total_remaining_amount': float(wage_record.total_remaining_amount),
+        'payment_status': wage_record.payment_status,
+        'expense_entry_id': wage_record.expense_entry.id if wage_record.expense_entry else None,
+        'employee_wages': wage_record.employee_wages,  # Full employee wage details
+        'payment_transactions': transaction_data,  # Audit trail
+        'payment_summary': wage_record.get_payment_summary(),
+        'data_structure': 'optimized_json_array',
+        'created_at': wage_record.created_at.isoformat(),
+        'updated_at': wage_record.updated_at.isoformat()
     })
 
 
@@ -908,7 +982,7 @@ def export_attendance(request):
 
 @api_view(['GET'])
 def wage_summary(request):
-    """Get wage summary for a specific week"""
+    """Get wage summary using optimized structure"""
     week_start = request.query_params.get('week_start')
     
     if not week_start:
@@ -925,36 +999,107 @@ def wage_summary(request):
             status=status.HTTP_400_BAD_REQUEST
         )
     
-    # Get weekly wage payments
-    wage_payments = WeeklyWagePayment.objects.filter(
+    # Get optimized wage record
+    wage_record = WeeklyWagePayment.objects.filter(
         week_start_date=week_start_date
-    ).select_related('employee')
+    ).first()
     
-    payments_data = []
-    for payment in wage_payments:
-        payments_data.append({
-            'employee_id': str(payment.employee.id),
-            'employee_name': payment.employee_name,
-            'present_days': payment.total_present_days,
-            'half_days': payment.total_half_days,
-            'daily_wage': float(payment.daily_wage_amount),
-            'gross_amount': float(payment.gross_amount),
-            'net_amount': float(payment.net_amount),
-            'paid_amount': float(payment.paid_amount),
-            'remaining_amount': float(payment.remaining_amount),
-            'payment_status': payment.payment_status
+    if not wage_record:
+        return Response(
+            {'error': 'No wage record found for this week'}, 
+            status=status.HTTP_404_NOT_FOUND
+        )
+    
+    # Build detailed employee summary from JSON array
+    employees_summary = []
+    for emp_data in wage_record.employee_wages:
+        employees_summary.append({
+            'employee_id': emp_data.get('employee_id'),
+            'employee_name': emp_data.get('employee_name'),
+            'present_days': emp_data.get('present_days', 0),
+            'half_days': emp_data.get('half_days', 0),
+            'daily_wage': emp_data.get('daily_wage', 0),
+            'gross_amount': emp_data.get('gross_amount', 0),
+            'net_amount': emp_data.get('net_amount', 0),
+            'paid_amount': emp_data.get('paid_amount', 0),
+            'remaining_amount': emp_data.get('remaining_amount', 0),
+            'payment_status': emp_data.get('payment_status', 'pending')
         })
     
     summary = {
-        'week_start_date': week_start_date.isoformat(),
-        'total_employees': wage_payments.count(),
-        'total_gross_wages': float(wage_payments.aggregate(Sum('gross_amount'))['gross_amount__sum'] or 0),
-        'total_paid_amount': float(wage_payments.aggregate(Sum('paid_amount'))['paid_amount__sum'] or 0),
-        'total_remaining_amount': float(wage_payments.aggregate(Sum('remaining_amount'))['remaining_amount__sum'] or 0),
-        'fully_paid_count': wage_payments.filter(payment_status='paid').count(),
-        'partially_paid_count': wage_payments.filter(payment_status='partial').count(),
-        'pending_count': wage_payments.filter(payment_status='pending').count(),
-        'payments': payments_data
+        'week_start_date': wage_record.week_start_date.isoformat(),
+        'week_end_date': wage_record.week_end_date.isoformat(),
+        'total_employees': wage_record.total_employees,
+        'total_gross_wages': float(wage_record.total_gross_amount),
+        'total_net_wages': float(wage_record.total_net_amount),
+        'total_paid_amount': float(wage_record.total_paid_amount),
+        'total_remaining_amount': float(wage_record.total_remaining_amount),
+        'payment_status': wage_record.payment_status,
+        'fully_paid_count': len([e for e in wage_record.employee_wages if e.get('payment_status') == 'paid']),
+        'partially_paid_count': len([e for e in wage_record.employee_wages if e.get('payment_status') == 'partial']),
+        'pending_count': len([e for e in wage_record.employee_wages if e.get('payment_status') == 'pending']),
+        'employees': employees_summary,
+        'data_structure': 'optimized_json_array'
     }
     
     return Response(summary)
+
+def _is_employee_fully_paid(employee_id, week_start_date):
+    """
+    Helper function to check if an employee is fully paid for a given week
+    by examining the JSON data in WeeklyWagePayment records
+    """
+    wage_records = WeeklyWagePayment.objects.filter(
+        week_start_date=week_start_date
+    )
+    
+    for record in wage_records:
+        for emp_wage in record.employee_wages:
+            if (emp_wage.get('employee_id') == str(employee_id) and 
+                emp_wage.get('payment_status') == 'paid'):
+                return True
+    
+    return False
+
+@api_view(['POST'])
+def generate_wage_record(request):
+    """Generate wage record for a specific week if it doesn't exist"""
+    week_start = request.data.get('week_start')
+    
+    if not week_start:
+        return Response(
+            {'error': 'week_start date is required'}, 
+            status=status.HTTP_400_BAD_REQUEST
+        )
+    
+    try:
+        week_start_date = datetime.strptime(week_start, '%Y-%m-%d').date()
+    except ValueError:
+        return Response(
+            {'error': 'Invalid date format. Use YYYY-MM-DD'}, 
+            status=status.HTTP_400_BAD_REQUEST
+        )
+    
+    try:
+        # Generate wage record (will return existing one if already exists)
+        wage_record = WeeklyWagePayment.generate_weekly_wage_record(week_start_date)
+        
+        return Response({
+            'message': 'Wage record generated successfully',
+            'wage_record_id': wage_record.id,
+            'week_start_date': wage_record.week_start_date.isoformat(),
+            'week_end_date': wage_record.week_end_date.isoformat(),
+            'total_employees': wage_record.total_employees,
+            'total_net_amount': float(wage_record.total_net_amount),
+            'payment_status': wage_record.payment_status,
+            'data_structure': 'optimized_json_array'
+        })
+        
+    except Exception as e:
+        print(f"Error generating wage record: {str(e)}")
+        return Response(
+            {'error': f'Failed to generate wage record: {str(e)}'}, 
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+    
