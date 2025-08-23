@@ -2,7 +2,7 @@
 from django.urls import path
 from django.conf import settings
 from django.conf.urls.static import static
-from xe_farm.views.attendance.attendance_view import wage_payment_details, wage_payment_history, export_attendance, get_active_employees, get_attendance, mark_attendance, pay_wages, update_attendance, update_single_attendance, validate_employees_for_attendance, wage_summary, weekly_data
+from xe_farm.views.attendance.attendance_view import employee_report, employee_summary_report, single_employee_report, wage_payment_details, wage_payment_history, export_attendance, get_active_employees, get_attendance, mark_attendance, pay_wages, update_attendance, update_single_attendance, validate_employees_for_attendance, wage_summary, weekly_data, weekly_wages_report
 from xe_farm.views.attendance.pdf_wage_report_view import download_employee_wage_detail_pdf, download_payroll_summary_pdf, download_weekly_wage_summary_pdf, generate_wage_range_pdf, generate_weekly_wage_pdf
 from xe_farm.views.employee.emp_views import (save_employee_data,get_employee_list, get_employee_detail,  edit_employee_data, delete_employee, restore_employee, change_employee_status, toggle_employee_status)
 from xe_farm.views.merchant.merchant_views import (save_merchant_data, get_all_merchants, get_merchant_by_id, update_merchant_data, delete_merchant)
@@ -137,6 +137,13 @@ urlpatterns = [
     path('api/wages/pdf/employee-detail/', download_employee_wage_detail_pdf, name='employee_wage_detail_pdf'),
     # path('api/attendance/pdf/register/', download_attendance_register_pdf, name='attendance_register_pdf'),
     path('api/payroll/pdf/summary/', download_payroll_summary_pdf, name='payroll_summary_pdf'),
+
+    # Reports and Analytics
+    path('api/employee-report/', employee_report, name='employee-report'),
+    path('api/employee/<int:employee_id>/report/', single_employee_report, name='single_employee_report'),
+    path('api/employee-summary-report/', employee_summary_report, name='employee-summary-report'),
+    path('api/weekly-wages-report/', weekly_wages_report, name='weekly-wages-report'),
+    path('api/export-attendance/', export_attendance, name='export-attendance'),
    
 
 ]

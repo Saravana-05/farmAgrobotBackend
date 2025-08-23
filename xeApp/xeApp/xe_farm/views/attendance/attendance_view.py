@@ -1102,4 +1102,806 @@ def generate_wage_record(request):
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
 
+@api_view(['GET'])
+def employee_report(request):
+    """
+    Get comprehensive employee attendance and wages report for last 28 days
+    Includes individual employee details, weekly breakdowns, and overall summary
+    """
+    try:
+        # Get date range - last 28 days
+        end_date = date.today()
+        start_date = end_date - timedelta(days=27)  # 28 days including today
+        
+        # Allow custom date range via query parameters
+        custom_start = request.query_params.get('start_date')
+        custom_end = request.query_params.get('end_date')
+        
+        if custom_start:
+            try:
+                start_date = datetime.strptime(custom_start, '%Y-%m-%d').date()
+            except ValueError:
+                return Response({'error': 'Invalid start_date format. Use YYYY-MM-DD'}, status=400)
+        
+        if custom_end:
+            try:
+                end_date = datetime.strptime(custom_end, '%Y-%m-%d').date()
+            except ValueError:
+                return Response({'error': 'Invalid end_date format. Use YYYY-MM-DD'}, status=400)
+        
+        # Get all active employees
+        employees = Employee.objects.filter(status=True).order_by('name')
+        
+        # Get attendance records for the date range
+        attendance_records = AttendanceRecord.objects.filter(
+            date__range=[start_date, end_date]
+        ).order_by('date')
+        
+        # Create attendance lookup by date
+        attendance_lookup = {}
+        for record in attendance_records:
+            attendance_lookup[record.date] = {
+                emp['employee_id']: emp for emp in record.attendance_data
+            }
+        
+        # Get all weeks in the date range
+        weeks_data = []
+        current_date = start_date
+        while current_date <= end_date:
+            week_start = get_monday_of_week(current_date)
+            if week_start not in [w['week_start'] for w in weeks_data]:
+                weeks_data.append({
+                    'week_start': week_start,
+                    'week_end': week_start + timedelta(days=6)
+                })
+            current_date += timedelta(days=7)
+        
+        # Get wage payment records for all weeks
+        wage_records = {}
+        for week in weeks_data:
+            wage_record = WeeklyWagePayment.objects.filter(
+                week_start_date=week['week_start']
+            ).first()
+            if wage_record:
+                wage_records[week['week_start']] = wage_record
+        
+        # Build employee reports
+        employees_report = []
+        overall_stats = {
+            'total_employees': len(employees),
+            'total_working_days': 0,
+            'total_present_days': 0,
+            'total_half_days': 0,
+            'total_absent_days': 0,
+            'total_wages_earned': 0,
+            'total_wages_paid': 0,
+            'total_wages_pending': 0
+        }
+        
+        for employee in employees:
+            emp_id = str(employee.id)
+            current_wage = Wage.get_current_wage(employee)
+            daily_wage = current_wage.amount if current_wage else Decimal('0')
+            
+            # Employee daily attendance and wages
+            daily_data = []
+            emp_present_days = 0
+            emp_half_days = 0
+            emp_absent_days = 0
+            emp_total_wages = Decimal('0')
+            
+            # Process each day in the date range
+            current_date = start_date
+            while current_date <= end_date:
+                date_str = current_date.isoformat()
+                
+                # Get attendance status for this employee on this date
+                attendance_status = None
+                wage_earned = Decimal('0')
+                
+                if current_date in attendance_lookup and emp_id in attendance_lookup[current_date]:
+                    emp_attendance = attendance_lookup[current_date][emp_id]
+                    attendance_status = emp_attendance.get('status')
+                    
+                    # Calculate wage for this day
+                    if attendance_status == 1:  # Present
+                        wage_earned = daily_wage
+                        emp_present_days += 1
+                    elif attendance_status == 2:  # Half day
+                        wage_earned = daily_wage / 2
+                        emp_half_days += 1
+                    elif attendance_status == 3:  # Late (treat as present)
+                        wage_earned = daily_wage
+                        emp_present_days += 1
+                    elif attendance_status == 0:  # Absent
+                        emp_absent_days += 1
+                else:
+                    # No attendance record for this date - consider as absent
+                    emp_absent_days += 1
+                
+                emp_total_wages += wage_earned
+                
+                # Map status to readable format
+                status_map = {0: 'Absent', 1: 'Present', 2: 'Half Day', 3: 'Late', None: 'No Record'}
+                
+                daily_data.append({
+                    'date': date_str,
+                    'day_name': current_date.strftime('%A'),
+                    'status': status_map.get(attendance_status),
+                    'status_code': attendance_status,
+                    'wage_earned': float(wage_earned)
+                })
+                
+                current_date += timedelta(days=1)
+            
+            # Weekly breakdown for this employee
+            weekly_breakdown = []
+            emp_total_paid = Decimal('0')
+            emp_total_pending = Decimal('0')
+            
+            for week in weeks_data:
+                week_start = week['week_start']
+                week_end = week['week_end']
+                
+                # Filter daily data for this week
+                week_daily_data = [
+                    day for day in daily_data 
+                    if week_start <= datetime.strptime(day['date'], '%Y-%m-%d').date() <= week_end
+                ]
+                
+                # Calculate week totals
+                week_present = len([d for d in week_daily_data if d['status_code'] in [1, 3]])
+                week_half_days = len([d for d in week_daily_data if d['status_code'] == 2])
+                week_absent = len([d for d in week_daily_data if d['status_code'] in [0, None]])
+                week_wages = sum(Decimal(str(d['wage_earned'])) for d in week_daily_data)
+                
+                # Get payment info from wage record
+                week_paid_amount = Decimal('0')
+                week_payment_status = 'pending'
+                
+                if week_start in wage_records:
+                    wage_record = wage_records[week_start]
+                    emp_wage_data = wage_record.get_employee_wage_data(emp_id)
+                    if emp_wage_data:
+                        week_paid_amount = Decimal(str(emp_wage_data.get('paid_amount', 0)))
+                        week_payment_status = emp_wage_data.get('payment_status', 'pending')
+                
+                emp_total_paid += week_paid_amount
+                week_pending = week_wages - week_paid_amount
+                emp_total_pending += week_pending
+                
+                weekly_breakdown.append({
+                    'week_start': week_start.isoformat(),
+                    'week_end': week_end.isoformat(),
+                    'present_days': week_present,
+                    'half_days': week_half_days,
+                    'absent_days': week_absent,
+                    'total_wages_earned': float(week_wages),
+                    'wages_paid': float(week_paid_amount),
+                    'wages_pending': float(week_pending),
+                    'payment_status': week_payment_status,
+                    'daily_details': week_daily_data
+                })
+            
+            # Add to overall stats
+            total_working_days = emp_present_days + emp_half_days + emp_absent_days
+            overall_stats['total_working_days'] += total_working_days
+            overall_stats['total_present_days'] += emp_present_days
+            overall_stats['total_half_days'] += emp_half_days
+            overall_stats['total_absent_days'] += emp_absent_days
+            overall_stats['total_wages_earned'] += float(emp_total_wages)
+            overall_stats['total_wages_paid'] += float(emp_total_paid)
+            overall_stats['total_wages_pending'] += float(emp_total_pending)
+            
+            # Build employee report
+            employees_report.append({
+                'employee_id': emp_id,
+                'employee_name': employee.name,
+                'daily_wage': float(daily_wage),
+                'period_summary': {
+                    'total_days': total_working_days,
+                    'present_days': emp_present_days,
+                    'half_days': emp_half_days,
+                    'absent_days': emp_absent_days,
+                    'attendance_percentage': round((emp_present_days + emp_half_days * 0.5) / max(total_working_days, 1) * 100, 2),
+                    'total_wages_earned': float(emp_total_wages),
+                    'total_wages_paid': float(emp_total_paid),
+                    'total_wages_pending': float(emp_total_pending),
+                    'payment_percentage': round(float(emp_total_paid) / max(float(emp_total_wages), 1) * 100, 2)
+                },
+                'weekly_breakdown': weekly_breakdown,
+                'daily_attendance': daily_data
+            })
+        
+        # Calculate overall percentages
+        if overall_stats['total_working_days'] > 0:
+            overall_stats['overall_attendance_percentage'] = round(
+                (overall_stats['total_present_days'] + overall_stats['total_half_days'] * 0.5) / 
+                overall_stats['total_working_days'] * 100, 2
+            )
+        else:
+            overall_stats['overall_attendance_percentage'] = 0
+        
+        if overall_stats['total_wages_earned'] > 0:
+            overall_stats['overall_payment_percentage'] = round(
+                overall_stats['total_wages_paid'] / overall_stats['total_wages_earned'] * 100, 2
+            )
+        else:
+            overall_stats['overall_payment_percentage'] = 0
+        
+        # Weekly summary across all employees
+        weekly_summary = []
+        for week in weeks_data:
+            week_start = week['week_start']
+            week_employees_data = []
+            week_totals = {
+                'total_employees': len(employees),
+                'total_present_days': 0,
+                'total_half_days': 0,
+                'total_wages_earned': 0,
+                'total_wages_paid': 0,
+                'employees_fully_paid': 0,
+                'employees_partially_paid': 0,
+                'employees_unpaid': 0
+            }
+            
+            # Get wage record for this week
+            wage_record = wage_records.get(week_start)
+            
+            for employee in employees:
+                emp_id = str(employee.id)
+                
+                # Find this employee's data for this week from the individual reports
+                emp_week_data = None
+                for emp_report in employees_report:
+                    if emp_report['employee_id'] == emp_id:
+                        for week_data in emp_report['weekly_breakdown']:
+                            if week_data['week_start'] == week_start.isoformat():
+                                emp_week_data = week_data
+                                break
+                        break
+                
+                if emp_week_data:
+                    week_totals['total_present_days'] += emp_week_data['present_days']
+                    week_totals['total_half_days'] += emp_week_data['half_days']
+                    week_totals['total_wages_earned'] += emp_week_data['total_wages_earned']
+                    week_totals['total_wages_paid'] += emp_week_data['wages_paid']
+                    
+                    # Count payment statuses
+                    if emp_week_data['payment_status'] == 'paid':
+                        week_totals['employees_fully_paid'] += 1
+                    elif emp_week_data['payment_status'] == 'partial':
+                        week_totals['employees_partially_paid'] += 1
+                    else:
+                        week_totals['employees_unpaid'] += 1
+            
+            weekly_summary.append({
+                'week_start': week_start.isoformat(),
+                'week_end': week['week_end'].isoformat(),
+                'week_totals': week_totals,
+                'wage_record_id': wage_record.id if wage_record else None,
+                'wage_record_status': wage_record.payment_status if wage_record else 'No Record'
+            })
+        
+        return Response({
+            'report_period': {
+                'start_date': start_date.isoformat(),
+                'end_date': end_date.isoformat(),
+                'total_days': (end_date - start_date).days + 1,
+                'total_weeks': len(weeks_data)
+            },
+            'overall_summary': overall_stats,
+            'weekly_summary': weekly_summary,
+            'employees_detailed_report': employees_report,
+            'report_generated_at': timezone.now().isoformat(),
+            'data_structure': 'comprehensive_employee_report'
+        })
+        
+    except Exception as e:
+        print(f"Error generating employee report: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return Response(
+            {'error': f'Failed to generate employee report: {str(e)}'}, 
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+@api_view(['GET'])
+def single_employee_report(request, employee_id):
+    """
+    Get comprehensive employee attendance and wages report for a specific employee
+    URL: /api/employee/{employee_id}/report/
+    """
+    try:
+        # Validate employee exists
+        try:
+            employee = Employee.objects.get(id=employee_id, status=True)
+        except Employee.DoesNotExist:
+            return Response(
+                {'error': f'Employee with ID {employee_id} not found or inactive'}, 
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        # Get date range - last 28 days by default
+        end_date = date.today()
+        start_date = end_date - timedelta(days=27)  # 28 days including today
+        
+        # Allow custom date range via query parameters
+        custom_start = request.query_params.get('start_date')
+        custom_end = request.query_params.get('end_date')
+        
+        if custom_start:
+            try:
+                start_date = datetime.strptime(custom_start, '%Y-%m-%d').date()
+            except ValueError:
+                return Response({'error': 'Invalid start_date format. Use YYYY-MM-DD'}, status=400)
+        
+        if custom_end:
+            try:
+                end_date = datetime.strptime(custom_end, '%Y-%m-%d').date()
+            except ValueError:
+                return Response({'error': 'Invalid end_date format. Use YYYY-MM-DD'}, status=400)
+        
+        # Validate date range
+        if start_date > end_date:
+            return Response({'error': 'Start date cannot be after end date'}, status=400)
+        
+        emp_id = str(employee.id)
+        current_wage = Wage.get_current_wage(employee)
+        daily_wage = current_wage.amount if current_wage else Decimal('0')
+        
+        # Get attendance records for the date range
+        attendance_records = AttendanceRecord.objects.filter(
+            date__range=[start_date, end_date]
+        ).order_by('date')
+        
+        # Create attendance lookup by date
+        attendance_lookup = {}
+        for record in attendance_records:
+            attendance_lookup[record.date] = {
+                emp['employee_id']: emp for emp in record.attendance_data
+            }
+        
+        # Get all weeks in the date range
+        weeks_data = []
+        current_date = start_date
+        while current_date <= end_date:
+            week_start = get_monday_of_week(current_date)
+            if week_start not in [w['week_start'] for w in weeks_data]:
+                weeks_data.append({
+                    'week_start': week_start,
+                    'week_end': week_start + timedelta(days=6)
+                })
+            current_date += timedelta(days=7)
+        
+        # Get wage payment records for all weeks
+        wage_records = {}
+        for week in weeks_data:
+            wage_record = WeeklyWagePayment.objects.filter(
+                week_start_date=week['week_start']
+            ).first()
+            if wage_record:
+                wage_records[week['week_start']] = wage_record
+        
+        # Employee daily attendance and wages
+        daily_data = []
+        emp_present_days = 0
+        emp_half_days = 0
+        emp_absent_days = 0
+        emp_total_wages = Decimal('0')
+        
+        # Process each day in the date range
+        current_date = start_date
+        while current_date <= end_date:
+            date_str = current_date.isoformat()
+            
+            # Get attendance status for this employee on this date
+            attendance_status = None
+            wage_earned = Decimal('0')
+            
+            if current_date in attendance_lookup and emp_id in attendance_lookup[current_date]:
+                emp_attendance = attendance_lookup[current_date][emp_id]
+                attendance_status = emp_attendance.get('status')
+                
+                # Calculate wage for this day
+                if attendance_status == 1:  # Present
+                    wage_earned = daily_wage
+                    emp_present_days += 1
+                elif attendance_status == 2:  # Half day
+                    wage_earned = daily_wage / 2
+                    emp_half_days += 1
+                elif attendance_status == 3:  # Late (treat as present)
+                    wage_earned = daily_wage
+                    emp_present_days += 1
+                elif attendance_status == 0:  # Absent
+                    emp_absent_days += 1
+            else:
+                # No attendance record for this date - consider as absent
+                emp_absent_days += 1
+            
+            emp_total_wages += wage_earned
+            
+            # Map status to readable format
+            status_map = {0: 'Absent', 1: 'Present', 2: 'Half Day', 3: 'Late', None: 'No Record'}
+            
+            daily_data.append({
+                'date': date_str,
+                'day_name': current_date.strftime('%A'),
+                'status': status_map.get(attendance_status),
+                'status_code': attendance_status,
+                'wage_earned': float(wage_earned)
+            })
+            
+            current_date += timedelta(days=1)
+        
+        # Weekly breakdown for this employee
+        weekly_breakdown = []
+        emp_total_paid = Decimal('0')
+        emp_total_pending = Decimal('0')
+        
+        for week in weeks_data:
+            week_start = week['week_start']
+            week_end = week['week_end']
+            
+            # Filter daily data for this week
+            week_daily_data = [
+                day for day in daily_data 
+                if week_start <= datetime.strptime(day['date'], '%Y-%m-%d').date() <= week_end
+            ]
+            
+            # Calculate week totals
+            week_present = len([d for d in week_daily_data if d['status_code'] in [1, 3]])
+            week_half_days = len([d for d in week_daily_data if d['status_code'] == 2])
+            week_absent = len([d for d in week_daily_data if d['status_code'] in [0, None]])
+            week_wages = sum(Decimal(str(d['wage_earned'])) for d in week_daily_data)
+            
+            # Get payment info from wage record
+            week_paid_amount = Decimal('0')
+            week_payment_status = 'pending'
+            
+            if week_start in wage_records:
+                wage_record = wage_records[week_start]
+                emp_wage_data = wage_record.get_employee_wage_data(emp_id)
+                if emp_wage_data:
+                    week_paid_amount = Decimal(str(emp_wage_data.get('paid_amount', 0)))
+                    week_payment_status = emp_wage_data.get('payment_status', 'pending')
+            
+            emp_total_paid += week_paid_amount
+            week_pending = week_wages - week_paid_amount
+            emp_total_pending += week_pending
+            
+            weekly_breakdown.append({
+                'week_start': week_start.isoformat(),
+                'week_end': week_end.isoformat(),
+                'present_days': week_present,
+                'half_days': week_half_days,
+                'absent_days': week_absent,
+                'total_wages_earned': float(week_wages),
+                'wages_paid': float(week_paid_amount),
+                'wages_pending': float(week_pending),
+                'payment_status': week_payment_status
+            })
+        
+        # Calculate totals and percentages
+        total_working_days = emp_present_days + emp_half_days + emp_absent_days
+        attendance_percentage = 0
+        payment_percentage = 0
+        
+        if total_working_days > 0:
+            attendance_percentage = round((emp_present_days + emp_half_days * 0.5) / total_working_days * 100, 2)
+        
+        if float(emp_total_wages) > 0:
+            payment_percentage = round(float(emp_total_paid) / float(emp_total_wages) * 100, 2)
+        
+        # Build response data structure that matches what Flutter expects
+        response_data = {
+            'success': True,
+            'data': {
+                'employee_id': emp_id,
+                'employee_name': employee.name,
+                'daily_wage': float(daily_wage),
+                'period_summary': {
+                    'total_days': total_working_days,
+                    'present_days': emp_present_days,
+                    'half_days': emp_half_days,
+                    'absent_days': emp_absent_days,
+                    'attendance_percentage': attendance_percentage,
+                    'total_wages_earned': float(emp_total_wages),
+                    'total_wages_paid': float(emp_total_paid),
+                    'total_wages_pending': float(emp_total_pending),
+                    'payment_percentage': payment_percentage
+                },
+                'daily_attendance': daily_data,
+                'weekly_breakdown': weekly_breakdown,
+                'report_period': {
+                    'start_date': start_date.isoformat(),
+                    'end_date': end_date.isoformat(),
+                    'total_days': (end_date - start_date).days + 1,
+                    'total_weeks': len(weeks_data)
+                },
+                'report_generated_at': timezone.now().isoformat()
+            }
+        }
+        
+        return Response(response_data)
+        
+    except Exception as e:
+        print(f"Error generating single employee report: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return Response({
+            'success': False,
+            'error': f'Failed to generate employee report: {str(e)}',
+            'data': None
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+@api_view(['GET'])
+def employee_summary_report(request):
+    """
+    Get a simplified summary report of employees for quick overview
+    """
+    try:
+        # Get date range - last 28 days by default
+        end_date = date.today()
+        start_date = end_date - timedelta(days=27)
+        
+        # Allow custom date range
+        custom_start = request.query_params.get('start_date')
+        custom_end = request.query_params.get('end_date')
+        
+        if custom_start:
+            start_date = datetime.strptime(custom_start, '%Y-%m-%d').date()
+        if custom_end:
+            end_date = datetime.strptime(custom_end, '%Y-%m-%d').date()
+        
+        employees = Employee.objects.filter(status=True)
+        attendance_records = AttendanceRecord.objects.filter(
+            date__range=[start_date, end_date]
+        )
+        
+        # Create attendance lookup
+        attendance_lookup = {}
+        for record in attendance_records:
+            attendance_lookup[record.date] = {
+                emp['employee_id']: emp['status'] for emp in record.attendance_data
+            }
+        
+        # Get recent wage payments
+        recent_wage_records = WeeklyWagePayment.objects.filter(
+            week_start_date__gte=start_date - timedelta(days=7)
+        )
+        
+        employees_summary = []
+        for employee in employees:
+            emp_id = str(employee.id)
+            current_wage = Wage.get_current_wage(employee)
+            daily_wage = current_wage.amount if current_wage else Decimal('0')
+            
+            # Count attendance for the period
+            present_days = 0
+            half_days = 0
+            total_possible_days = 0
+            
+            current_date = start_date
+            while current_date <= end_date:
+                total_possible_days += 1
+                if (current_date in attendance_lookup and 
+                    emp_id in attendance_lookup[current_date]):
+                    status = attendance_lookup[current_date][emp_id]
+                    if status in [1, 3]:  # Present or Late
+                        present_days += 1
+                    elif status == 2:  # Half day
+                        half_days += 1
+                current_date += timedelta(days=1)
+            
+            # Calculate recent payments
+            recent_payments = Decimal('0')
+            payment_status = 'No Recent Payments'
+            
+            for wage_record in recent_wage_records:
+                emp_wage_data = wage_record.get_employee_wage_data(emp_id)
+                if emp_wage_data:
+                    recent_payments += Decimal(str(emp_wage_data.get('paid_amount', 0)))
+                    if emp_wage_data.get('payment_status') in ['paid', 'partial']:
+                        payment_status = 'Recent Payments Found'
+            
+            attendance_rate = round((present_days + half_days * 0.5) / max(total_possible_days, 1) * 100, 2)
+            estimated_wages = (present_days * daily_wage) + (half_days * daily_wage / 2)
+            
+            employees_summary.append({
+                'employee_id': emp_id,
+                'employee_name': employee.name,
+                'daily_wage': float(daily_wage),
+                'present_days': present_days,
+                'half_days': half_days,
+                'attendance_rate': attendance_rate,
+                'estimated_wages': float(estimated_wages),
+                'recent_payments': float(recent_payments),
+                'payment_status': payment_status,
+                'has_current_wage': current_wage is not None
+            })
+        
+        return Response({
+            'report_period': {
+                'start_date': start_date.isoformat(),
+                'end_date': end_date.isoformat(),
+                'total_days': total_possible_days
+            },
+            'employees_summary': employees_summary,
+            'total_employees': len(employees_summary),
+            'report_generated_at': timezone.now().isoformat()
+        })
+        
+    except Exception as e:
+        return Response(
+            {'error': f'Failed to generate summary report: {str(e)}'}, 
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+@api_view(['GET'])
+def weekly_wages_report(request):
+    """
+    Get weekly wages report for all employees across multiple weeks
+    """
+    try:
+        # Get number of weeks to look back (default 4 weeks)
+        weeks_back = int(request.query_params.get('weeks_back', 4))
+        
+        # Calculate date range
+        end_date = date.today()
+        start_date = end_date - timedelta(weeks=weeks_back)
+        
+        # Get all Monday dates in the range
+        week_starts = []
+        current_date = get_monday_of_week(start_date)
+        while current_date <= get_monday_of_week(end_date):
+            week_starts.append(current_date)
+            current_date += timedelta(weeks=1)
+        
+        employees = Employee.objects.filter(status=True)
+        
+        weekly_reports = []
+        grand_totals = {
+            'total_gross_wages': 0,
+            'total_paid_wages': 0,
+            'total_pending_wages': 0,
+            'total_employees_across_weeks': 0
+        }
+        
+        for week_start in week_starts:
+            week_end = week_start + timedelta(days=6)
+            
+            # Get wage record for this week
+            wage_record = WeeklyWagePayment.objects.filter(
+                week_start_date=week_start
+            ).first()
+            
+            week_data = {
+                'week_start': week_start.isoformat(),
+                'week_end': week_end.isoformat(),
+                'wage_record_exists': wage_record is not None,
+                'employees_data': [],
+                'week_totals': {
+                    'total_employees': 0,
+                    'total_gross_wages': 0,
+                    'total_paid_wages': 0,
+                    'total_pending_wages': 0,
+                    'fully_paid_employees': 0,
+                    'partially_paid_employees': 0,
+                    'unpaid_employees': 0
+                }
+            }
+            
+            if wage_record:
+                # Use optimized wage record data
+                for emp_wage_data in wage_record.employee_wages:
+                    emp_data = {
+                        'employee_id': emp_wage_data.get('employee_id'),
+                        'employee_name': emp_wage_data.get('employee_name'),
+                        'present_days': emp_wage_data.get('present_days', 0),
+                        'half_days': emp_wage_data.get('half_days', 0),
+                        'daily_wage': emp_wage_data.get('daily_wage', 0),
+                        'gross_wages': emp_wage_data.get('gross_amount', 0),
+                        'net_wages': emp_wage_data.get('net_amount', 0),
+                        'paid_amount': emp_wage_data.get('paid_amount', 0),
+                        'pending_amount': emp_wage_data.get('remaining_amount', 0),
+                        'payment_status': emp_wage_data.get('payment_status', 'pending')
+                    }
+                    
+                    week_data['employees_data'].append(emp_data)
+                    
+                    # Update week totals
+                    week_data['week_totals']['total_gross_wages'] += emp_data['gross_wages']
+                    week_data['week_totals']['total_paid_wages'] += emp_data['paid_amount']
+                    week_data['week_totals']['total_pending_wages'] += emp_data['pending_amount']
+                    
+                    if emp_data['payment_status'] == 'paid':
+                        week_data['week_totals']['fully_paid_employees'] += 1
+                    elif emp_data['payment_status'] == 'partial':
+                        week_data['week_totals']['partially_paid_employees'] += 1
+                    else:
+                        week_data['week_totals']['unpaid_employees'] += 1
+                
+                week_data['week_totals']['total_employees'] = len(wage_record.employee_wages)
+                week_data['wage_record_id'] = wage_record.id
+                week_data['payment_status'] = wage_record.payment_status
+                
+            else:
+                # No wage record exists - build from attendance data
+                week_dates = [week_start + timedelta(days=i) for i in range(7)]
+                attendance_records = AttendanceRecord.objects.filter(date__in=week_dates)
+                
+                attendance_lookup = {}
+                for record in attendance_records:
+                    attendance_lookup[record.date] = {
+                        emp['employee_id']: emp for emp in record.attendance_data
+                    }
+                
+                for employee in employees:
+                    emp_id = str(employee.id)
+                    current_wage = Wage.get_current_wage(employee)
+                    daily_wage = current_wage.amount if current_wage else Decimal('0')
+                    
+                    # Calculate attendance for this week
+                    present_days = 0
+                    half_days = 0
+                    
+                    for day_date in week_dates:
+                        if (day_date in attendance_lookup and 
+                            emp_id in attendance_lookup[day_date]):
+                            status = attendance_lookup[day_date][emp_id].get('status')
+                            if status in [1, 3]:  # Present or Late
+                                present_days += 1
+                            elif status == 2:  # Half day
+                                half_days += 1
+                    
+                    gross_wages = (present_days * daily_wage) + (half_days * daily_wage / 2)
+                    
+                    emp_data = {
+                        'employee_id': emp_id,
+                        'employee_name': employee.name,
+                        'present_days': present_days,
+                        'half_days': half_days,
+                        'daily_wage': float(daily_wage),
+                        'gross_wages': float(gross_wages),
+                        'net_wages': float(gross_wages),
+                        'paid_amount': 0,
+                        'pending_amount': float(gross_wages),
+                        'payment_status': 'pending'
+                    }
+                    
+                    if gross_wages > 0:  # Only include if employee worked
+                        week_data['employees_data'].append(emp_data)
+                        week_data['week_totals']['total_gross_wages'] += float(gross_wages)
+                        week_data['week_totals']['total_pending_wages'] += float(gross_wages)
+                        week_data['week_totals']['unpaid_employees'] += 1
+                
+                week_data['week_totals']['total_employees'] = len(week_data['employees_data'])
+                week_data['payment_status'] = 'No Record'
+            
+            # Update grand totals
+            grand_totals['total_gross_wages'] += week_data['week_totals']['total_gross_wages']
+            grand_totals['total_paid_wages'] += week_data['week_totals']['total_paid_wages']
+            grand_totals['total_pending_wages'] += week_data['week_totals']['total_pending_wages']
+            grand_totals['total_employees_across_weeks'] += week_data['week_totals']['total_employees']
+            
+            weekly_reports.append(week_data)
+        
+        return Response({
+            'report_period': {
+                'weeks_covered': len(week_starts),
+                'start_date': week_starts[0].isoformat() if week_starts else None,
+                'end_date': (week_starts[-1] + timedelta(days=6)).isoformat() if week_starts else None
+            },
+            'grand_totals': grand_totals,
+            'weekly_reports': weekly_reports,
+            'report_generated_at': timezone.now().isoformat()
+        })
+        
+    except Exception as e:
+        return Response(
+            {'error': f'Failed to generate weekly wages report: {str(e)}'}, 
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
     
