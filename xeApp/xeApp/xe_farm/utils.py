@@ -1,12 +1,11 @@
-from datetime import timedelta
+from datetime import date, timedelta
 import os
 from django.conf import settings
 from django.core.files.base import ContentFile
 from PIL import Image
 import io
 import logging
-
-from .models import Employee
+from .models import Employee, Wage
 
 logger = logging.getLogger(__name__)
 
@@ -146,3 +145,45 @@ def validate_employees_exist(attendance_records):
             )
     
     return errors
+
+
+
+
+def validate_wage_date_ranges(employee_id, new_effective_from, new_effective_to=None, exclude_wage_id=None):
+    """
+    Validate that a new wage date range doesn't overlap with existing wages
+    
+    Args:
+        employee_id: ID of the employee
+        new_effective_from: Start date of new wage period
+        new_effective_to: End date of new wage period (None for ongoing)
+        exclude_wage_id: ID of wage to exclude from validation (for updates)
+    
+    Returns:
+        tuple: (is_valid, error_message)
+    """
+    existing_wages = Wage.objects.filter(employee_id=employee_id)
+    
+    if exclude_wage_id:
+        existing_wages = existing_wages.exclude(id=exclude_wage_id)
+    
+    for wage in existing_wages:
+        # Check for overlap
+        existing_start = wage.effective_from
+        existing_end = wage.effective_to
+        
+        # If either period has no end date, treat as ongoing
+        if new_effective_to is None:
+            new_end = date.max
+        else:
+            new_end = new_effective_to
+            
+        if existing_end is None:
+            existing_end = date.max
+        
+        # Check for overlap
+        if new_effective_from <= existing_end and existing_start <= new_end:
+            return False, f"Wage period overlaps with existing wage from {existing_start} to {wage.effective_to or 'present'}"
+    
+    return True, None
+

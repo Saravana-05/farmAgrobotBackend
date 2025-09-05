@@ -116,7 +116,7 @@ urlpatterns = [
     path('api/attendance/<str:date_str>/', get_attendance, name='get-attendance'),
     path('api/attendance/<str:date_str>/update/', update_attendance, name='update-attendance'),
     path('api/update-single-attendance/', update_single_attendance, name='update-single-attendance'),
-    path('get-active-employees/', get_active_employees, name='get_active_employees'),
+    path('api/get-active-employees/', get_active_employees, name='get_active_employees'),
     path('validate-employees/', validate_employees_for_attendance, name='validate_employees'),
     # Wage Management
     path('api/pay-wages/', pay_wages, name='pay-wages'),

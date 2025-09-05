@@ -1,9 +1,9 @@
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 from rest_framework import status
-from django.db.models import Sum
+from django.db.models import Sum, Q
 from django.utils import timezone
-from django.db import transaction
+from django.db import transaction as db_transaction
 from datetime import datetime, date, timedelta
 from collections import defaultdict
 from decimal import Decimal
@@ -16,12 +16,34 @@ from ...serializers import (
     PayWageSerializer,
     AttendanceRecordSerializer
 )
-from ...models import AttendanceRecord, BulkWagePayment, Employee, Wage, WeeklyWagePayment,Expense
+from ...models import AttendanceRecord, BulkWagePayment, Employee, Wage, WeeklyWagePayment, WeeklyWagePaymentManager,Expense
+from xe_farm import models
 
+
+def get_wage_for_date(employee, target_date):
+    """
+    Get the wage rate that was effective for an employee on a specific date.
+    
+    Args:
+        employee: Employee instance
+        target_date: date object for which to find the wage rate
+    
+    Returns:
+        Wage instance that was effective on target_date, or None if no wage found
+    """
+    # FIX: Use Q from django.db.models instead of models.Q
+    wage = Wage.objects.filter(
+        employee=employee,
+        effective_from__lte=target_date
+    ).filter(
+        Q(effective_to__isnull=True) | Q(effective_to__gte=target_date)
+    ).order_by('-effective_from').first()
+    
+    return wage
 
 @api_view(['POST'])
 def mark_attendance(request):
-    """Mark attendance for multiple employees on a specific date"""
+    """Mark attendance for multiple employees on a specific date with historical wages"""
     serializer = AttendanceCreateUpdateSerializer(
         data=request.data, 
         context={'request': request}
@@ -42,6 +64,7 @@ def mark_attendance(request):
         }, status=status.HTTP_201_CREATED)
     
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
 
 
 @api_view(['PUT'])
@@ -81,7 +104,7 @@ def update_attendance(request, date_str):
 
 @api_view(['POST'])
 def update_single_attendance(request):
-    """Update attendance for a single employee on a specific date"""
+    """Update attendance for a single employee on a specific date with historical wages"""
     employee_id = request.data.get('employee_id')
     employee_name = request.data.get('employee_name')
     attendance_date_str = request.data.get('date')
@@ -95,39 +118,35 @@ def update_single_attendance(request):
     
     try:
         attendance_date = datetime.strptime(attendance_date_str, '%Y-%m-%d').date()
-        # Validate employee exists and is active
         employee = Employee.objects.get(id=employee_id, status=True)
         
-        # Validate employee name matches
         if employee.name != employee_name:
             return Response(
                 {'error': f'Employee name mismatch. Expected: {employee.name}, Got: {employee_name}'}, 
                 status=status.HTTP_400_BAD_REQUEST
             )
             
-    except (ValueError, Employee.DoesNotExist) as e:
+    except (ValueError, Employee.DoesNotExist):
         return Response(
             {'error': 'Invalid date format, employee not found, or employee is inactive'}, 
             status=status.HTTP_400_BAD_REQUEST
         )
     
-    # Check if employee has a current wage
-    current_wage = Wage.get_current_wage(employee)
-    if not current_wage:
+    # FIXED: Use historical wage rate for the attendance date
+    historical_wage = get_wage_for_date(employee, attendance_date)
+    if not historical_wage:
         return Response(
-            {'error': f'Employee {employee_name} does not have a current wage rate'}, 
+            {'error': f'Employee {employee_name} did not have a wage rate on {attendance_date_str}'}, 
             status=status.HTTP_400_BAD_REQUEST
         )
     
-    # FIXED: Check if wages are already paid for this week
-    # Remove invalid employee filter and check JSON data instead
+    # Check if wages are already paid for this week
     week_start = get_monday_of_week(attendance_date)
     wage_records = WeeklyWagePayment.objects.filter(
         week_start_date=week_start,
         payment_status='paid'
     )
     
-    # Check if this specific employee is already fully paid
     employee_wages_paid = False
     for record in wage_records:
         for emp_wage in record.employee_wages:
@@ -144,16 +163,15 @@ def update_single_attendance(request):
             status=status.HTTP_400_BAD_REQUEST
         )
     
-    with transaction.atomic():
-        # Get or create attendance record for the date
+    with db_transaction.atomic():
         attendance_record, created = AttendanceRecord.objects.get_or_create(
             date=attendance_date,
             defaults={'attendance_data': []}
         )
         
-        wage_amount = current_wage.amount
+        # Use historical wage amount
+        wage_amount = historical_wage.amount
         
-        # Update employee attendance in the record
         attendance_record.update_employee_status(
             employee_id, 
             employee_name, 
@@ -165,8 +183,12 @@ def update_single_attendance(request):
         'message': 'Attendance updated successfully',
         'employee_name': employee_name,
         'date': attendance_date.isoformat(),
-        'status': attendance_status
+        'status': attendance_status,
+        'wage_rate_used': float(wage_amount),
+        'wage_effective_from': historical_wage.effective_from.isoformat(),
+        'wage_effective_to': historical_wage.effective_to.isoformat() if historical_wage.effective_to else None
     })
+
 
 @api_view(['GET'])
 def get_attendance(request, date_str):
@@ -220,13 +242,27 @@ def get_active_employees(request):
 
 @api_view(['POST'])
 def validate_employees_for_attendance(request):
-    """Validate employees before marking attendance"""
+    """Validate employees before marking attendance with historical wage check"""
     serializer = EmployeeAttendanceValidationSerializer(data=request.data)
     
     if serializer.is_valid():
         employee_ids = serializer.validated_data['employee_ids']
+        attendance_date_str = request.data.get('date')
         
-        # Get employee details with wage information
+        if not attendance_date_str:
+            return Response(
+                {'error': 'date is required for historical wage validation'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            attendance_date = datetime.strptime(attendance_date_str, '%Y-%m-%d').date()
+        except ValueError:
+            return Response(
+                {'error': 'Invalid date format. Use YYYY-MM-DD'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
         employees = Employee.objects.filter(
             id__in=employee_ids, 
             status=True
@@ -236,28 +272,36 @@ def validate_employees_for_attendance(request):
         invalid_employees = []
         
         for employee in employees:
-            current_wage = Wage.get_current_wage(employee)
+            # FIXED: Get historical wage for the attendance date
+            historical_wage = get_wage_for_date(employee, attendance_date)
+            
             employee_data = {
                 'employee_id': str(employee.id),
                 'employee_name': employee.name,
-                'daily_wage': float(current_wage.amount) if current_wage else 0.0,
-                'has_wage': current_wage is not None
+                'daily_wage': float(historical_wage.amount) if historical_wage else 0.0,
+                'has_wage': historical_wage is not None,
+                'wage_period': {
+                    'from': historical_wage.effective_from.isoformat() if historical_wage else None,
+                    'to': historical_wage.effective_to.isoformat() if historical_wage and historical_wage.effective_to else None
+                }
             }
             
-            if current_wage:
+            if historical_wage:
                 valid_employees.append(employee_data)
             else:
                 invalid_employees.append({
                     **employee_data,
-                    'issue': 'No current wage rate'
+                    'issue': f'No wage rate effective on {attendance_date_str}'
                 })
         
         return Response({
+            'attendance_date': attendance_date_str,
             'valid_employees': valid_employees,
             'invalid_employees': invalid_employees,
             'can_mark_attendance': len(invalid_employees) == 0,
-            'message': 'All employees are valid for attendance' if len(invalid_employees) == 0 
-                      else f'{len(invalid_employees)} employees have issues that need to be resolved'
+            'message': 'All employees have valid wage rates for this date' if len(invalid_employees) == 0 
+                      else f'{len(invalid_employees)} employees have wage rate issues for {attendance_date_str}',
+            'historical_wage_validation': True
         })
     
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
@@ -297,31 +341,162 @@ def pay_wages(request):
 
 
 def _pay_all_wages(request, week_start_date):
-    """Pay all wages using optimized WeeklyWagePayment structure"""
+    """Pay all wages using optimized WeeklyWagePayment structure with historical wages"""
     try:
+        print("=" * 80)
+        print(f"STARTING BULK WAGE PAYMENT PROCESS")
+        print(f"Week Start Date: {week_start_date}")
+        print(f"Process Started At: {timezone.now()}")
+        print("=" * 80)
+        
         # Check if wage record already exists
         existing_wage_record = WeeklyWagePayment.objects.filter(
             week_start_date=week_start_date
         ).first()
         
-        if existing_wage_record and existing_wage_record.payment_status == 'paid':
-            return Response(
-                {'error': 'Wages already fully paid for this week'}, 
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
-        # Generate or get existing wage record
-        if not existing_wage_record:
-            wage_record = WeeklyWagePayment.generate_weekly_wage_record(week_start_date)
+        print(f"\nEXISTING RECORD CHECK:")
+        if existing_wage_record:
+            print(f"   Found existing wage record: ID = {existing_wage_record.id}")
+            print(f"   Current payment status: {existing_wage_record.payment_status}")
+            print(f"   Total employees in record: {existing_wage_record.total_employees}")
+            print(f"   Total net amount: ${existing_wage_record.total_net_amount}")
+            print(f"   Total paid amount: ${existing_wage_record.total_paid_amount}")
+            print(f"   Total remaining: ${existing_wage_record.total_remaining_amount}")
+            
+            if existing_wage_record.payment_status == 'paid':
+                print("   ERROR: Wages already fully paid for this week")
+                return Response(
+                    {'error': 'Wages already fully paid for this week'}, 
+                    status=status.HTTP_400_BAD_REQUEST
+                )
         else:
+            print(f"   No existing wage record found for week {week_start_date}")
+        
+        print(f"\nWAGE RECORD GENERATION/VALIDATION:")
+        
+        # FIXED: Always use historical wage generation method
+        if not existing_wage_record:
+            print(f"   Creating new wage record with historical rates...")
+            print(f"   Calling: WeeklyWagePayment.generate_weekly_wage_record_with_historical_rates({week_start_date})")
+            wage_record = WeeklyWagePaymentManager.generate_weekly_wage_record_with_historical_rates(week_start_date)
+            print(f"   New wage record created: ID = {wage_record.id}")
+        else:
+            print(f"   Validating existing record for historical rates...")
+            # Check if existing record uses historical rates
+            if not validate_historical_wages_in_record(existing_wage_record):
+                print("   WARNING: Existing record doesn't use historical rates. Recalculating...")
+                existing_wage_record.recalculate_with_historical_rates()
+                print("   Recalculation with historical rates completed")
+            else:
+                print("   Existing record already uses historical rates")
             wage_record = existing_wage_record
+        
+        # Print detailed wage record information
+        print(f"\nWAGE RECORD DETAILS:")
+        print(f"   Record ID: {wage_record.id}")
+        print(f"   Week Period: {wage_record.week_start_date} to {wage_record.week_end_date}")
+        print(f"   Total Employees: {wage_record.total_employees}")
+        print(f"   Total Gross Amount: ${wage_record.total_gross_amount}")
+        print(f"   Total Net Amount: ${wage_record.total_net_amount}")
+        print(f"   Total Paid Amount: ${wage_record.total_paid_amount}")
+        print(f"   Total Remaining: ${wage_record.total_remaining_amount}")
+        print(f"   Payment Status: {wage_record.payment_status}")
+        print(f"   Data Structure: optimized_single_record_with_json_array")
+        
+        # Print detailed employee wage data being stored
+        print(f"\nEMPLOYEE WAGES DATA BEING STORED:")
+        print(f"   Number of employees in JSON array: {len(wage_record.employee_wages)}")
+        
+        # Initialize historical wage info tracking
+        historical_wage_info = {
+            'employees_with_historical_calculation': 0,
+            'employees_with_multiple_rates': 0,
+            'wage_rate_changes_detected': []
+        }
+        
+        for i, emp_data in enumerate(wage_record.employee_wages, 1):
+            print(f"\n   Employee #{i}:")
+            print(f"      ID: {emp_data.get('employee_id')}")
+            print(f"      Name: {emp_data.get('employee_name')}")
+            print(f"      Daily Wage: ${emp_data.get('daily_wage', 0)}")
+            print(f"      Present Days: {emp_data.get('present_days', 0)}")
+            print(f"      Half Days: {emp_data.get('half_days', 0)}")
+            print(f"      Gross Amount: ${emp_data.get('gross_amount', 0)}")
+            print(f"      Net Amount: ${emp_data.get('net_amount', 0)}")
+            print(f"      Paid Amount: ${emp_data.get('paid_amount', 0)}")
+            print(f"      Remaining: ${emp_data.get('remaining_amount', 0)}")
+            print(f"      Payment Status: {emp_data.get('payment_status', 'pending')}")
+            
+            # Print historical wage calculation details
+            historical_calc = emp_data.get('historical_wage_calculation', {})
+            print(f"      Historical Calc Enabled: {historical_calc.get('enabled', False)}")
+            if historical_calc.get('wage_changes'):
+                print(f"      Wage Changes Detected: {len(historical_calc['wage_changes'])}")
+                for change in historical_calc['wage_changes']:
+                    print(f"         Date: {change['date']}, Rate: ${change['rate']}")
+            
+            # Print attendance details with daily wage rates
+            attendance_details = emp_data.get('attendance_details', {})
+            print(f"      Attendance Details ({len(attendance_details)} days):")
+            for date_str, day_data in sorted(attendance_details.items()):
+                status_map = {0: 'Absent', 1: 'Present', 2: 'Half Day', 3: 'Late'}
+                status_text = status_map.get(day_data.get('status'), 'Unknown')
+                print(f"         {date_str}: {status_text} (Rate: ${day_data.get('wage_rate', 0)})")
+        
+        # Validate that the wage record now has historical rates
+        validation_result = validate_historical_wages_in_record(wage_record)
+        print(f"\nHISTORICAL WAGE VALIDATION:")
+        print(f"   Validation Result: {validation_result}")
+        
+        if not validation_result:
+            print("   CRITICAL ERROR: Failed to generate wage record with historical rates")
+            return Response(
+                {'error': 'Failed to generate wage record with historical rates'}, 
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
         
         # Get payment details from request
         payment_mode = request.data.get('payment_mode', 'Cash')
         payment_reference = request.data.get('payment_reference', '')
         remarks = request.data.get('remarks', f'Bulk wage payment for week {week_start_date}')
         
-        with transaction.atomic():
+        print(f"\nPAYMENT DETAILS FROM REQUEST:")
+        print(f"   Payment Mode: {payment_mode}")
+        print(f"   Payment Reference: '{payment_reference}'")
+        print(f"   Remarks: '{remarks}'")
+        print(f"   Request Data Keys: {list(request.data.keys())}")
+        print(f"   Full Request Data: {dict(request.data)}")
+        
+        # Store BEFORE payment state for detailed comparison
+        before_payment_state = {
+            'total_paid_amount': float(wage_record.total_paid_amount),
+            'payment_status': wage_record.payment_status,
+            'individual_payments': {}
+        }
+        
+        for emp_data in wage_record.employee_wages:
+            emp_id = emp_data.get('employee_id')
+            before_payment_state['individual_payments'][emp_id] = {
+                'paid_amount': emp_data.get('paid_amount', 0),
+                'remaining_amount': emp_data.get('remaining_amount', 0),
+                'payment_status': emp_data.get('payment_status', 'pending')
+            }
+        
+        print(f"\nDETAILED BEFORE PAYMENT STATE:")
+        print(f"   Total Paid: ${before_payment_state['total_paid_amount']}")
+        print(f"   Overall Status: {before_payment_state['payment_status']}")
+        print(f"   Individual Employee States:")
+        for emp_id, emp_state in before_payment_state['individual_payments'].items():
+            emp_name = next((emp['employee_name'] for emp in wage_record.employee_wages 
+                           if emp['employee_id'] == emp_id), 'Unknown')
+            print(f"      {emp_name}: Paid=${emp_state['paid_amount']}, Remaining=${emp_state['remaining_amount']}, Status={emp_state['payment_status']}")
+        
+        # FIX: Use db_transaction instead of transaction to avoid naming conflict
+        with db_transaction.atomic():
+            print(f"\nEXECUTING ATOMIC TRANSACTION:")
+            print(f"   Calling: wage_record.make_bulk_payment()")
+            print(f"   Transaction started...")
+            
             # Pay all pending wages
             total_payment = wage_record.make_bulk_payment(
                 payment_mode=payment_mode,
@@ -329,13 +504,325 @@ def _pay_all_wages(request, week_start_date):
                 remarks=remarks
             )
             
+            print(f"   Bulk payment method returned: ${total_payment}")
+            print(f"   Transaction completed successfully")
+            
             if total_payment == 0:
+                print("   ERROR: No pending payments found")
                 return Response(
                     {'error': 'No pending payments found'}, 
                     status=status.HTTP_400_BAD_REQUEST
                 )
         
-        return Response({
+        # Refresh record from database and show AFTER state
+        wage_record.refresh_from_db()
+        
+        print(f"\nAFTER PAYMENT STATE (Fresh from DB):")
+        print(f"   Total Paid Amount: ${wage_record.total_paid_amount}")
+        print(f"   Payment Status: {wage_record.payment_status}")
+        print(f"   Total Remaining: ${wage_record.total_remaining_amount}")
+        
+        # Show changes in individual employee payments
+        print(f"\nPAYMENT CHANGES PER EMPLOYEE:")
+        for emp_data in wage_record.employee_wages:
+            emp_id = emp_data.get('employee_id')
+            emp_name = emp_data.get('employee_name')
+            
+            before_state = before_payment_state['individual_payments'].get(emp_id, {})
+            after_paid = emp_data.get('paid_amount', 0)
+            after_remaining = emp_data.get('remaining_amount', 0)
+            after_payment_status = emp_data.get('payment_status', 'pending')
+            
+            before_paid = before_state.get('paid_amount', 0)
+            payment_change = after_paid - before_paid
+            
+            print(f"   {emp_name}:")
+            print(f"      Paid: ${before_paid} → ${after_paid} (Change: +${payment_change})")
+            print(f"      Remaining: ${before_state.get('remaining_amount', 0)} → ${after_remaining}")
+            print(f"      Status: {before_state.get('payment_status', 'pending')} → {after_payment_status}")
+        
+        # Print expense entry details if created
+        if wage_record.expense_entry:
+            print(f"\nEXPENSE ENTRY DETAILS:")
+            expense = wage_record.expense_entry
+            print(f"   Expense ID: {expense.id}")
+            print(f"   Amount: ${expense.amount}")
+            print(f"   Description: {expense.description}")
+            print(f"   Date: {expense.date}")
+            print(f"   Category: {expense.category}")
+            print(f"   Payment Mode: {getattr(expense, 'payment_mode', 'N/A')}")
+            print(f"   Reference: {getattr(expense, 'reference', 'N/A')}")
+        
+        # Print transaction records if any were created
+        payment_transaction_records = wage_record.payment_transactions.all()
+        if payment_transaction_records.exists():
+            print(f"\nPAYMENT TRANSACTION RECORDS:")
+            print(f"   Total transactions: {payment_transaction_records.count()}")
+            for i, payment_transaction in enumerate(payment_transaction_records, 1):
+                print(f"   Transaction #{i}:")
+                print(f"      ID: {payment_transaction.id}")
+                print(f"      Employee: {payment_transaction.employee_name} (ID: {payment_transaction.employee_id})")
+                print(f"      Amount: ${payment_transaction.amount}")
+                print(f"      Type: {payment_transaction.transaction_type}")
+                print(f"      Mode: {payment_transaction.payment_mode}")
+                print(f"      Reference: {payment_transaction.reference_number}")
+                print(f"      Date: {payment_transaction.transaction_date}")
+                print(f"      Remarks: {payment_transaction.remarks}")
+        
+        # Verify historical wage usage in the response
+        print(f"\nFINAL HISTORICAL WAGE VERIFICATION:")
+        
+        for emp_data in wage_record.employee_wages:
+            emp_name = emp_data.get('employee_name')
+            historical_calc = emp_data.get('historical_wage_calculation', {})
+            
+            if historical_calc.get('enabled', False):
+                historical_wage_info['employees_with_historical_calculation'] += 1
+                print(f"   {emp_name}: Historical calculation verified")
+                
+                # Check for multiple wage rates in attendance details
+                attendance_details = emp_data.get('attendance_details', {})
+                wage_rates_used = set()
+                for date_str, day_data in attendance_details.items():
+                    if 'wage_rate' in day_data:
+                        wage_rates_used.add(day_data['wage_rate'])
+                
+                if len(wage_rates_used) > 1:
+                    historical_wage_info['employees_with_multiple_rates'] += 1
+                    historical_wage_info['wage_rate_changes_detected'].append({
+                        'employee_id': emp_data.get('employee_id'),
+                        'employee_name': emp_data.get('employee_name'),
+                        'wage_rates_used': list(wage_rates_used)
+                    })
+                    print(f"   {emp_name}: Multiple wage rates used - {sorted(list(wage_rates_used))}")
+                    
+                    # Print detailed rate usage by date
+                    print(f"      Daily rate breakdown:")
+                    for date_str, day_data in sorted(attendance_details.items()):
+                        if 'wage_rate' in day_data:
+                            status_map = {0: 'Absent', 1: 'Present', 2: 'Half Day', 3: 'Late'}
+                            attendance_status = status_map.get(day_data.get('status'), 'Unknown')
+                            print(f"         {date_str}: ${day_data['wage_rate']} ({attendance_status})")
+                else:
+                    print(f"   {emp_name}: Single wage rate used - ${list(wage_rates_used)[0] if wage_rates_used else 0}")
+            else:
+                print(f"   {emp_name}: Historical calculation NOT enabled")
+        
+        print(f"\nHISTORICAL WAGE SUMMARY:")
+        print(f"   Employees with historical calculation: {historical_wage_info['employees_with_historical_calculation']}")
+        print(f"   Employees with multiple rates: {historical_wage_info['employees_with_multiple_rates']}")
+        print(f"   Total wage rate changes detected: {len(historical_wage_info['wage_rate_changes_detected'])}")
+        
+        # Print detailed wage change information
+        if historical_wage_info['wage_rate_changes_detected']:
+            print(f"\nDETAILED WAGE RATE CHANGES:")
+            for change_info in historical_wage_info['wage_rate_changes_detected']:
+                print(f"   {change_info['employee_name']} (ID: {change_info['employee_id']}):")
+                print(f"      Rates used: {change_info['wage_rates_used']}")
+        
+        # Print complete JSON data structure being stored
+        print(f"\nCOMPLETE JSON DATA STRUCTURE BEING STORED:")
+        print(f"   WeeklyWagePayment Model Fields:")
+        print(f"      id: {wage_record.id}")
+        print(f"      week_start_date: {wage_record.week_start_date}")
+        print(f"      week_end_date: {wage_record.week_end_date}")
+        print(f"      total_employees: {wage_record.total_employees}")
+        print(f"      total_gross_amount: {wage_record.total_gross_amount}")
+        print(f"      total_net_amount: {wage_record.total_net_amount}")
+        print(f"      total_paid_amount: {wage_record.total_paid_amount}")
+        print(f"      total_remaining_amount: {wage_record.total_remaining_amount}")
+        print(f"      payment_status: {wage_record.payment_status}")
+        print(f"      created_at: {wage_record.created_at}")
+        print(f"      updated_at: {wage_record.updated_at}")
+        
+        # Print complete employee_wages JSON array
+        print(f"\nEMPLOYEE_WAGES JSON ARRAY (Complete Structure):")
+        import json
+        try:
+            formatted_json = json.dumps(wage_record.employee_wages, indent=2, default=str)
+            print(formatted_json)
+        except Exception as json_error:
+            print(f"   Error formatting JSON: {json_error}")
+            print(f"   Raw employee_wages data: {wage_record.employee_wages}")
+        
+        # Validate that the wage record now has historical rates
+        validation_result = validate_historical_wages_in_record(wage_record)
+        print(f"\nFINAL VALIDATION:")
+        print(f"   Historical wage validation: {validation_result}")
+        
+        if not validation_result:
+            print("   CRITICAL ERROR: Final validation failed")
+            return Response(
+                {'error': 'Failed to generate wage record with historical rates'}, 
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+        
+        # Get payment details from request
+        payment_mode = request.data.get('payment_mode', 'Cash')
+        payment_reference = request.data.get('payment_reference', '')
+        remarks = request.data.get('remarks', f'Bulk wage payment for week {week_start_date}')
+        
+        print(f"\nPAYMENT DETAILS FROM REQUEST:")
+        print(f"   Payment Mode: {payment_mode}")
+        print(f"   Payment Reference: '{payment_reference}'")
+        print(f"   Remarks: '{remarks}'")
+        print(f"   Request Data Keys: {list(request.data.keys())}")
+        print(f"   Full Request Data: {dict(request.data)}")
+        
+        # Store BEFORE payment state for detailed comparison
+        before_payment_state = {
+            'total_paid_amount': float(wage_record.total_paid_amount),
+            'payment_status': wage_record.payment_status,
+            'individual_payments': {}
+        }
+        
+        for emp_data in wage_record.employee_wages:
+            emp_id = emp_data.get('employee_id')
+            before_payment_state['individual_payments'][emp_id] = {
+                'paid_amount': emp_data.get('paid_amount', 0),
+                'remaining_amount': emp_data.get('remaining_amount', 0),
+                'payment_status': emp_data.get('payment_status', 'pending')
+            }
+        
+        print(f"\nDETAILED BEFORE PAYMENT STATE:")
+        print(f"   Total Paid: ${before_payment_state['total_paid_amount']}")
+        print(f"   Overall Status: {before_payment_state['payment_status']}")
+        print(f"   Individual Employee States:")
+        for emp_id, emp_state in before_payment_state['individual_payments'].items():
+            emp_name = next((emp['employee_name'] for emp in wage_record.employee_wages 
+                           if emp['employee_id'] == emp_id), 'Unknown')
+            print(f"      {emp_name}: Paid=${emp_state['paid_amount']}, Remaining=${emp_state['remaining_amount']}, Status={emp_state['payment_status']}")
+        
+        with db_transaction.atomic():
+            print(f"\nEXECUTING ATOMIC TRANSACTION:")
+            print(f"   Calling: wage_record.make_bulk_payment()")
+            print(f"   Transaction started...")
+            
+            # Pay all pending wages
+            total_payment = wage_record.make_bulk_payment(
+                payment_mode=payment_mode,
+                reference=payment_reference,
+                remarks=remarks
+            )
+            
+            print(f"   Bulk payment method returned: ${total_payment}")
+            print(f"   Transaction completed successfully")
+            
+            if total_payment == 0:
+                print("   ERROR: No pending payments found")
+                return Response(
+                    {'error': 'No pending payments found'}, 
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+        
+        # Refresh record from database and show AFTER state
+        wage_record.refresh_from_db()
+        
+        print(f"\nAFTER PAYMENT STATE (Fresh from DB):")
+        print(f"   Total Paid Amount: ${wage_record.total_paid_amount}")
+        print(f"   Payment Status: {wage_record.payment_status}")
+        print(f"   Total Remaining: ${wage_record.total_remaining_amount}")
+        
+        # Show changes in individual employee payments
+        print(f"\nPAYMENT CHANGES PER EMPLOYEE:")
+        for emp_data in wage_record.employee_wages:
+            emp_id = emp_data.get('employee_id')
+            emp_name = emp_data.get('employee_name')
+            
+            before_state = before_payment_state['individual_payments'].get(emp_id, {})
+            after_paid = emp_data.get('paid_amount', 0)
+            after_remaining = emp_data.get('remaining_amount', 0)
+            after_payment_status = emp_data.get('payment_status', 'pending')
+            
+            before_paid = before_state.get('paid_amount', 0)
+            payment_change = after_paid - before_paid
+            
+            print(f"   {emp_name}:")
+            print(f"      Paid: ${before_paid} → ${after_paid} (Change: +${payment_change})")
+            print(f"      Remaining: ${before_state.get('remaining_amount', 0)} → ${after_remaining}")
+            print(f"      Status: {before_state.get('payment_status', 'pending')} → {after_payment_status}")
+        
+        # Print expense entry details if created
+        if wage_record.expense_entry:
+            print(f"\nEXPENSE ENTRY DETAILS:")
+            expense = wage_record.expense_entry
+            print(f"   Expense ID: {expense.id}")
+            print(f"   Amount: ${expense.amount}")
+            print(f"   Description: {expense.description}")
+            print(f"   Date: {expense.date}")
+            print(f"   Category: {expense.category}")
+            print(f"   Payment Mode: {getattr(expense, 'payment_mode', 'N/A')}")
+            print(f"   Reference: {getattr(expense, 'reference', 'N/A')}")
+        
+        # Print transaction records if any were created
+        payment_transaction_records = wage_record.payment_transactions.all()
+        if payment_transaction_records.exists():
+            print(f"\nPAYMENT TRANSACTION RECORDS:")
+            print(f"   Total transactions: {payment_transaction_records.count()}")
+            for i, payment_transaction in enumerate(payment_transaction_records, 1):
+                print(f"   Transaction #{i}:")
+                print(f"      ID: {payment_transaction.id}")
+                print(f"      Employee: {payment_transaction.employee_name} (ID: {payment_transaction.employee_id})")
+                print(f"      Amount: ${payment_transaction.amount}")
+                print(f"      Type: {payment_transaction.transaction_type}")
+                print(f"      Mode: {payment_transaction.payment_mode}")
+                print(f"      Reference: {payment_transaction.reference_number}")
+                print(f"      Date: {payment_transaction.transaction_date}")
+                print(f"      Remarks: {payment_transaction.remarks}")
+        
+        # Verify historical wage usage in the response
+        print(f"\nFINAL HISTORICAL WAGE VERIFICATION:")
+        
+        for emp_data in wage_record.employee_wages:
+            emp_name = emp_data.get('employee_name')
+            historical_calc = emp_data.get('historical_wage_calculation', {})
+            
+            if historical_calc.get('enabled', False):
+                historical_wage_info['employees_with_historical_calculation'] += 1
+                print(f"   {emp_name}: Historical calculation verified")
+                
+                # Check for multiple wage rates in attendance details
+                attendance_details = emp_data.get('attendance_details', {})
+                wage_rates_used = set()
+                for date_str, day_data in attendance_details.items():
+                    if 'wage_rate' in day_data:
+                        wage_rates_used.add(day_data['wage_rate'])
+                
+                if len(wage_rates_used) > 1:
+                    historical_wage_info['employees_with_multiple_rates'] += 1
+                    historical_wage_info['wage_rate_changes_detected'].append({
+                        'employee_id': emp_data.get('employee_id'),
+                        'employee_name': emp_data.get('employee_name'),
+                        'wage_rates_used': list(wage_rates_used)
+                    })
+                    print(f"   {emp_name}: Multiple wage rates used - {sorted(list(wage_rates_used))}")
+                    
+                    # Print detailed rate usage by date
+                    print(f"      Daily rate breakdown:")
+                    for date_str, day_data in sorted(attendance_details.items()):
+                        if 'wage_rate' in day_data:
+                            status_map = {0: 'Absent', 1: 'Present', 2: 'Half Day', 3: 'Late'}
+                            attendance_status = status_map.get(day_data.get('status'), 'Unknown')
+                            print(f"         {date_str}: ${day_data['wage_rate']} ({attendance_status})")
+                else:
+                    print(f"   {emp_name}: Single wage rate used - ${list(wage_rates_used)[0] if wage_rates_used else 0}")
+            else:
+                print(f"   {emp_name}: Historical calculation NOT enabled")
+        
+        print(f"\nHISTORICAL WAGE SUMMARY:")
+        print(f"   Employees with historical calculation: {historical_wage_info['employees_with_historical_calculation']}")
+        print(f"   Employees with multiple rates: {historical_wage_info['employees_with_multiple_rates']}")
+        print(f"   Total wage rate changes detected: {len(historical_wage_info['wage_rate_changes_detected'])}")
+        
+        # Print detailed wage change information
+        if historical_wage_info['wage_rate_changes_detected']:
+            print(f"\nDETAILED WAGE RATE CHANGES:")
+            for change_info in historical_wage_info['wage_rate_changes_detected']:
+                print(f"   {change_info['employee_name']} (ID: {change_info['employee_id']}):")
+                print(f"      Rates used: {change_info['wage_rates_used']}")
+        
+        # Prepare final response data
+        response_data = {
             'message': f'Bulk wage payment processed successfully for {wage_record.total_employees} employees',
             'wage_record_id': wage_record.id,
             'expense_id': wage_record.expense_entry.id if wage_record.expense_entry else None,
@@ -346,16 +833,52 @@ def _pay_all_wages(request, week_start_date):
             'payment_mode': payment_mode,
             'payment_reference': payment_reference,
             'data_structure': 'optimized_single_record_with_json_array',
-            'expense_recorded': wage_record.expense_entry is not None
-        })
+            'expense_recorded': wage_record.expense_entry is not None,
+            'historical_wages_applied': True,
+            'historical_wage_validation': historical_wage_info
+        }
+        
+        print(f"\nFINAL RESPONSE DATA:")
+        print(f"   Response Keys: {list(response_data.keys())}")
+        print(f"   Total Amount Paid: ${response_data['total_amount_paid']}")
+        print(f"   Total Employees: {response_data['total_employees']}")
+        print(f"   Data Structure: {response_data['data_structure']}")
+        print(f"   Expense Recorded: {response_data['expense_recorded']}")
+        print(f"   Historical Wages Applied: {response_data['historical_wages_applied']}")
+        
+        print(f"\nHISTORICAL WAGE VALIDATION SUMMARY:")
+        validation_info = response_data['historical_wage_validation']
+        print(f"   Employees with historical calculation: {validation_info['employees_with_historical_calculation']}")
+        print(f"   Employees with multiple rates: {validation_info['employees_with_multiple_rates']}")
+        print(f"   Wage rate changes detected: {len(validation_info['wage_rate_changes_detected'])}")
+        
+        print("=" * 80)
+        print(f"BULK WAGE PAYMENT PROCESS COMPLETED SUCCESSFULLY")
+        print(f"Total Payment Processed: ${total_payment}")
+        print(f"Week: {week_start_date} to {wage_record.week_end_date}")
+        print(f"Process Completed At: {timezone.now()}")
+        print("=" * 80)
+        
+        return Response(response_data)
         
     except Exception as e:
-        print(f"Error in _pay_all_wages: {str(e)}")
+        print("=" * 80)
+        print(f"CRITICAL ERROR IN BULK WAGE PAYMENT:")
+        print(f"   Error Type: {type(e).__name__}")
+        print(f"   Error Message: {str(e)}")
+        print(f"   Week Start Date: {week_start_date}")
+        print(f"   Error Time: {timezone.now()}")
+        
+        import traceback
+        print(f"\nFULL STACK TRACE:")
+        traceback.print_exc()
+        print("=" * 80)
+        
         return Response(
             {'error': f'Bulk payment failed: {str(e)}'}, 
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
-
+    
 def _pay_individual_wage(request, week_start_date):
     """Pay individual employee wage with comprehensive debugging"""
     try:
@@ -411,7 +934,7 @@ def _pay_individual_wage(request, week_start_date):
         
         if not wage_record:
             print("Creating new wage record...")
-            wage_record = WeeklyWagePayment.generate_weekly_wage_record(week_start_date)
+            wage_record = WeeklyWagePaymentManager.generate_weekly_wage_record_with_historical_rates(week_start_date)
             print(f"New wage record created: ID = {wage_record.id}")
         else:
             print(f"Using existing wage record: ID = {wage_record.id}")
@@ -420,7 +943,7 @@ def _pay_individual_wage(request, week_start_date):
         emp_data_before = wage_record.get_employee_wage_data(employee_id)
         print(f"BEFORE UPDATE - Employee data: {emp_data_before}")
         
-        with transaction.atomic():
+        with db_transaction.atomic():
             print("=== STARTING ATOMIC TRANSACTION ===")
             
             try:
@@ -572,7 +1095,7 @@ def verify_payment_data(request):
 
 @api_view(['GET'])
 def weekly_data(request):
-    """Get weekly attendance data using optimized structure"""
+    """Get weekly attendance data using historical wage rates"""
     try:
         week_start = request.query_params.get('week_start')
         
@@ -590,59 +1113,49 @@ def weekly_data(request):
         week_dates = get_week_dates(week_start_date)
         week_end_date = week_dates[-1]
         
-        # Check for optimized wage payment record
         wage_record = WeeklyWagePayment.objects.filter(
             week_start_date=week_start_date
         ).first()
         
-        # Check for old bulk payment (for backward compatibility)
         bulk_payment = BulkWagePayment.objects.filter(
             week_start_date=week_start_date
         ).first()
         
-        # Get all active employees
         employees = Employee.objects.filter(status=True)
         
-        # Get attendance records for the week
         attendance_records = AttendanceRecord.objects.filter(
             date__in=week_dates
         )
         
-        # Create attendance lookup by date
         attendance_lookup = {record.date: record.attendance_data for record in attendance_records}
         
-        # Build daily counts
         daily_counts = defaultdict(int)
         for record_date, attendance_data in attendance_lookup.items():
             if attendance_data:
                 present_count = len([emp for emp in attendance_data if emp.get('status') == 1])
                 daily_counts[record_date.isoformat()] = present_count
         
-        # Build employee data
         employees_data = []
         total_wages = 0
         wages_paid = False
         payment_type = 'none'
         
-        # PRIORITY 1: Use optimized WeeklyWagePayment record
         if wage_record:
-            print(f"Using OPTIMIZED wage record for week {week_start_date}")
             wages_paid = wage_record.payment_status in ['Fully Paid', 'Partial']
             payment_type = 'optimized'
             
-            # Create employee lookup from wage record
             wage_employee_lookup = {emp['employee_id']: emp for emp in wage_record.employee_wages}
             
             for employee in employees:
                 emp_id = str(employee.id)
-                current_wage = Wage.get_current_wage(employee)
-                daily_wage = current_wage.amount if current_wage else Decimal('0')
                 
-                # Get data from wage record if exists
+                # FIXED: Get historical wage for the week start date
+                historical_wage = get_wage_for_date(employee, week_start_date)
+                daily_wage = historical_wage.amount if historical_wage else Decimal('0')
+                
                 wage_emp_data = wage_employee_lookup.get(emp_id)
                 
                 if wage_emp_data:
-                    # Use data from wage record
                     employee_attendance = wage_emp_data.get('attendance_details', {})
                     present_days = wage_emp_data.get('present_days', 0)
                     half_days = wage_emp_data.get('half_days', 0)
@@ -651,9 +1164,9 @@ def weekly_data(request):
                     partial_payment = Decimal(str(wage_emp_data.get('paid_amount', 0)))
                     remaining_amount = Decimal(str(wage_emp_data.get('remaining_amount', 0)))
                 else:
-                    # Employee not in wage record - build from attendance
+                    # Build from attendance with historical wage
                     employee_attendance, present_days, half_days, total_wage = _build_employee_attendance_data(
-                        emp_id, week_dates, attendance_lookup, daily_wage
+                        emp_id, week_dates, attendance_lookup, week_start_date
                     )
                     payment_status = 'pending'
                     partial_payment = Decimal('0')
@@ -663,6 +1176,10 @@ def weekly_data(request):
                     'employee_id': emp_id,
                     'employee_name': employee.name,
                     'daily_wage': float(daily_wage),
+                    'wage_effective_period': {
+                        'from': historical_wage.effective_from.isoformat() if historical_wage else None,
+                        'to': historical_wage.effective_to.isoformat() if historical_wage and historical_wage.effective_to else None
+                    },
                     'attendance': employee_attendance,
                     'present_days': present_days,
                     'half_days': half_days,
@@ -674,25 +1191,22 @@ def weekly_data(request):
                 
                 total_wages += float(total_wage)
         
-        # PRIORITY 2: Check for old bulk payment (backward compatibility)
         elif bulk_payment:
-            print(f"Using BULK payment data for week {week_start_date}")
             wages_paid = True
             payment_type = 'bulk'
             
-            # Create a lookup from bulk payment data
             bulk_payment_lookup = {emp['employee_id']: emp for emp in bulk_payment.employee_payments}
             
             for employee in employees:
                 emp_id = str(employee.id)
-                current_wage = Wage.get_current_wage(employee)
-                daily_wage = current_wage.amount if current_wage else Decimal('0')
                 
-                # Get data from bulk payment if exists
+                # FIXED: Get historical wage for the week start date
+                historical_wage = get_wage_for_date(employee, week_start_date)
+                daily_wage = historical_wage.amount if historical_wage else Decimal('0')
+                
                 bulk_emp_data = bulk_payment_lookup.get(emp_id)
                 
                 if bulk_emp_data:
-                    # Use data from bulk payment
                     employee_attendance = bulk_emp_data.get('attendance_details', {})
                     present_days = bulk_emp_data.get('present_days', 0)
                     half_days = bulk_emp_data.get('half_days', 0)
@@ -701,9 +1215,9 @@ def weekly_data(request):
                     partial_payment = total_wage
                     remaining_amount = Decimal('0')
                 else:
-                    # Employee not in bulk payment - build from attendance
+                    # Build from attendance with historical wage
                     employee_attendance, present_days, half_days, total_wage = _build_employee_attendance_data(
-                        emp_id, week_dates, attendance_lookup, daily_wage
+                        emp_id, week_dates, attendance_lookup, week_start_date
                     )
                     payment_status = 'pending'
                     partial_payment = Decimal('0')
@@ -713,6 +1227,10 @@ def weekly_data(request):
                     'employee_id': emp_id,
                     'employee_name': employee.name,
                     'daily_wage': float(daily_wage),
+                    'wage_effective_period': {
+                        'from': historical_wage.effective_from.isoformat() if historical_wage else None,
+                        'to': historical_wage.effective_to.isoformat() if historical_wage and historical_wage.effective_to else None
+                    },
                     'attendance': employee_attendance,
                     'present_days': present_days,
                     'half_days': half_days,
@@ -724,26 +1242,30 @@ def weekly_data(request):
                 
                 total_wages += float(total_wage)
         
-        # PRIORITY 3: No payments exist - build from attendance only
         else:
-            print(f"Building from ATTENDANCE data only for week {week_start_date}")
+            # No payments exist - build from attendance with historical wages
             payment_type = 'none'
             wages_paid = False
             
             for employee in employees:
                 emp_id = str(employee.id)
-                current_wage = Wage.get_current_wage(employee)
-                daily_wage = current_wage.amount if current_wage else Decimal('0')
                 
-                # Build attendance dictionary for this employee
+                # FIXED: Get historical wage for the week start date
+                historical_wage = get_wage_for_date(employee, week_start_date)
+                daily_wage = historical_wage.amount if historical_wage else Decimal('0')
+                
                 employee_attendance, present_days, half_days, total_wage = _build_employee_attendance_data(
-                    emp_id, week_dates, attendance_lookup, daily_wage
+                    emp_id, week_dates, attendance_lookup, week_start_date
                 )
                 
                 employees_data.append({
                     'employee_id': emp_id,
                     'employee_name': employee.name,
                     'daily_wage': float(daily_wage),
+                    'wage_effective_period': {
+                        'from': historical_wage.effective_from.isoformat() if historical_wage else None,
+                        'to': historical_wage.effective_to.isoformat() if historical_wage and historical_wage.effective_to else None
+                    },
                     'attendance': employee_attendance,
                     'present_days': present_days,
                     'half_days': half_days,
@@ -763,10 +1285,10 @@ def weekly_data(request):
             'total_wages': total_wages,
             'wages_paid': wages_paid,
             'payment_type': payment_type,
-            'weekly_employee_count': len(employees_data)
+            'weekly_employee_count': len(employees_data),
+            'historical_wages_applied': True
         }
         
-        # Add optimized wage record info if exists
         if wage_record:
             response_data['wage_record_info'] = {
                 'id': wage_record.id,
@@ -779,7 +1301,6 @@ def weekly_data(request):
                 'data_structure': 'optimized_json_array'
             }
         
-        # Add bulk payment info if exists (for backward compatibility)
         elif bulk_payment:
             response_data['bulk_payment_info'] = {
                 'id': bulk_payment.id,
@@ -791,7 +1312,6 @@ def weekly_data(request):
                 'data_structure': 'legacy_bulk_payment'
             }
         
-        print(f"Weekly data response built successfully: {len(employees_data)} employees, payment_type={payment_type}")
         return Response(response_data)
         
     except Exception as e:
@@ -805,8 +1325,23 @@ def weekly_data(request):
 
         
 
-def _build_employee_attendance_data(emp_id, week_dates, attendance_lookup, daily_wage):
-    """Helper function to build employee attendance data from attendance records"""
+def _build_employee_attendance_data(emp_id, week_dates, attendance_lookup, target_date=None):
+    """
+    Helper function to build employee attendance data with historical wages
+    
+    Args:
+        emp_id: Employee ID
+        week_dates: List of dates in the week
+        attendance_lookup: Dictionary mapping dates to attendance data
+        target_date: Optional specific date for wage calculation (uses first week date if not provided)
+    """
+    employee = Employee.objects.get(id=emp_id)
+    
+    # Use the first date of the week for wage calculation if no specific date provided
+    wage_date = target_date or week_dates[0]
+    historical_wage = get_wage_for_date(employee, wage_date)
+    daily_wage = historical_wage.amount if historical_wage else Decimal('0')
+    
     employee_attendance = {}
     present_days = 0
     half_days = 0
@@ -817,7 +1352,6 @@ def _build_employee_attendance_data(emp_id, week_dates, attendance_lookup, daily
         employee_status = None
         
         if week_date in attendance_lookup and attendance_lookup[week_date]:
-            # Find this employee's status in the attendance data
             for emp_data in attendance_lookup[week_date]:
                 if str(emp_data.get('employee_id')) == emp_id:
                     employee_status = emp_data.get('status')
@@ -825,16 +1359,14 @@ def _build_employee_attendance_data(emp_id, week_dates, attendance_lookup, daily
         
         employee_attendance[date_str] = employee_status
         
-        # Count days by status
         if employee_status == 1:  # Present
             present_days += 1
         elif employee_status == 2:  # Half day
             half_days += 1
         elif employee_status == 3:  # Late (treat as present)
             late_days += 1
-            present_days += 1  # Count late as present for wage calculation
+            present_days += 1
     
-    # Calculate total wage
     total_wage = (present_days * daily_wage) + (half_days * daily_wage / 2)
     
     return employee_attendance, present_days, half_days, total_wage
@@ -847,7 +1379,7 @@ def wage_payment_history(request):
     from_date = request.query_params.get('from_date')
     to_date = request.query_params.get('to_date')
     
-    queryset = WeeklyWagePayment.objects.all()
+    queryset = WeeklyWagePaymentManager.objects.all()
     
     if from_date:
         try:
@@ -894,8 +1426,8 @@ def wage_payment_history(request):
 def wage_payment_details(request, record_id):
     """Get detailed view of a specific optimized wage payment record"""
     try:
-        wage_record = WeeklyWagePayment.objects.get(id=record_id)
-    except WeeklyWagePayment.DoesNotExist:
+        wage_record = WeeklyWagePaymentManager.objects.get(id=record_id)
+    except WeeklyWagePaymentManager.DoesNotExist:
         return Response({'error': 'Wage payment record not found'}, status=404)
     
     # Get payment transactions for audit trail
@@ -1082,7 +1614,7 @@ def generate_wage_record(request):
     
     try:
         # Generate wage record (will return existing one if already exists)
-        wage_record = WeeklyWagePayment.generate_weekly_wage_record(week_start_date)
+        wage_record = WeeklyWagePaymentManager.generate_weekly_wage_record_with_historical_rates(week_start_date)
         
         return Response({
             'message': 'Wage record generated successfully',
@@ -1409,11 +1941,9 @@ def employee_report(request):
 @api_view(['GET'])
 def single_employee_report(request, employee_id):
     """
-    Get comprehensive employee attendance and wages report for a specific employee
-    URL: /api/employee/{employee_id}/report/
+    Get comprehensive employee report with historical wage rates
     """
     try:
-        # Validate employee exists
         try:
             employee = Employee.objects.get(id=employee_id, status=True)
         except Employee.DoesNotExist:
@@ -1422,47 +1952,100 @@ def single_employee_report(request, employee_id):
                 status=status.HTTP_404_NOT_FOUND
             )
         
-        # Get date range - last 28 days by default
+        # Get date range
         end_date = date.today()
-        start_date = end_date - timedelta(days=27)  # 28 days including today
+        start_date = end_date - timedelta(days=27)
         
-        # Allow custom date range via query parameters
         custom_start = request.query_params.get('start_date')
         custom_end = request.query_params.get('end_date')
         
         if custom_start:
-            try:
-                start_date = datetime.strptime(custom_start, '%Y-%m-%d').date()
-            except ValueError:
-                return Response({'error': 'Invalid start_date format. Use YYYY-MM-DD'}, status=400)
-        
+            start_date = datetime.strptime(custom_start, '%Y-%m-%d').date()
         if custom_end:
-            try:
-                end_date = datetime.strptime(custom_end, '%Y-%m-%d').date()
-            except ValueError:
-                return Response({'error': 'Invalid end_date format. Use YYYY-MM-DD'}, status=400)
-        
-        # Validate date range
-        if start_date > end_date:
-            return Response({'error': 'Start date cannot be after end date'}, status=400)
+            end_date = datetime.strptime(custom_end, '%Y-%m-%d').date()
         
         emp_id = str(employee.id)
-        current_wage = Wage.get_current_wage(employee)
-        daily_wage = current_wage.amount if current_wage else Decimal('0')
         
-        # Get attendance records for the date range
+        # Get attendance records
         attendance_records = AttendanceRecord.objects.filter(
             date__range=[start_date, end_date]
         ).order_by('date')
         
-        # Create attendance lookup by date
         attendance_lookup = {}
         for record in attendance_records:
             attendance_lookup[record.date] = {
                 emp['employee_id']: emp for emp in record.attendance_data
             }
         
-        # Get all weeks in the date range
+        # Build daily data with historical wage rates
+        daily_data = []
+        emp_present_days = 0
+        emp_half_days = 0
+        emp_absent_days = 0
+        emp_total_wages = Decimal('0')
+        wage_changes = []  # Track wage rate changes
+        
+        current_date = start_date
+        last_wage_rate = None
+        
+        while current_date <= end_date:
+            date_str = current_date.isoformat()
+            
+            # Get the historical wage rate for this specific date
+            historical_wage = get_wage_for_date(employee, current_date)
+            daily_wage = historical_wage.amount if historical_wage else Decimal('0')
+            
+            # Track wage rate changes
+            if last_wage_rate != daily_wage and historical_wage:
+                wage_changes.append({
+                    'date': date_str,
+                    'wage_rate': float(daily_wage),
+                    'effective_from': historical_wage.effective_from.isoformat(),
+                    'effective_to': historical_wage.effective_to.isoformat() if historical_wage.effective_to else None
+                })
+                last_wage_rate = daily_wage
+            
+            # Get attendance status
+            attendance_status = None
+            wage_earned = Decimal('0')
+            
+            if current_date in attendance_lookup and emp_id in attendance_lookup[current_date]:
+                emp_attendance = attendance_lookup[current_date][emp_id]
+                attendance_status = emp_attendance.get('status')
+                
+                # Calculate wage using the historical rate for this date
+                if attendance_status == 1:  # Present
+                    wage_earned = daily_wage
+                    emp_present_days += 1
+                elif attendance_status == 2:  # Half day
+                    wage_earned = daily_wage / 2
+                    emp_half_days += 1
+                elif attendance_status == 3:  # Late
+                    wage_earned = daily_wage
+                    emp_present_days += 1
+                elif attendance_status == 0:  # Absent
+                    emp_absent_days += 1
+            else:
+                emp_absent_days += 1
+            
+            emp_total_wages += wage_earned
+            
+            status_map = {0: 'Absent', 1: 'Present', 2: 'Half Day', 3: 'Late', None: 'No Record'}
+            
+            daily_data.append({
+                'date': date_str,
+                'day_name': current_date.strftime('%A'),
+                'status': status_map.get(attendance_status),
+                'status_code': attendance_status,
+                'wage_earned': float(wage_earned),
+                'daily_wage_rate': float(daily_wage),
+                'wage_effective_from': historical_wage.effective_from.isoformat() if historical_wage else None,
+                'wage_effective_to': historical_wage.effective_to.isoformat() if historical_wage and historical_wage.effective_to else None
+            })
+            
+            current_date += timedelta(days=1)
+        
+        # Get weeks and calculate payments
         weeks_data = []
         current_date = start_date
         while current_date <= end_date:
@@ -1474,7 +2057,7 @@ def single_employee_report(request, employee_id):
                 })
             current_date += timedelta(days=7)
         
-        # Get wage payment records for all weeks
+        # Get wage payment records
         wage_records = {}
         for week in weeks_data:
             wage_record = WeeklyWagePayment.objects.filter(
@@ -1483,58 +2066,7 @@ def single_employee_report(request, employee_id):
             if wage_record:
                 wage_records[week['week_start']] = wage_record
         
-        # Employee daily attendance and wages
-        daily_data = []
-        emp_present_days = 0
-        emp_half_days = 0
-        emp_absent_days = 0
-        emp_total_wages = Decimal('0')
-        
-        # Process each day in the date range
-        current_date = start_date
-        while current_date <= end_date:
-            date_str = current_date.isoformat()
-            
-            # Get attendance status for this employee on this date
-            attendance_status = None
-            wage_earned = Decimal('0')
-            
-            if current_date in attendance_lookup and emp_id in attendance_lookup[current_date]:
-                emp_attendance = attendance_lookup[current_date][emp_id]
-                attendance_status = emp_attendance.get('status')
-                
-                # Calculate wage for this day
-                if attendance_status == 1:  # Present
-                    wage_earned = daily_wage
-                    emp_present_days += 1
-                elif attendance_status == 2:  # Half day
-                    wage_earned = daily_wage / 2
-                    emp_half_days += 1
-                elif attendance_status == 3:  # Late (treat as present)
-                    wage_earned = daily_wage
-                    emp_present_days += 1
-                elif attendance_status == 0:  # Absent
-                    emp_absent_days += 1
-            else:
-                # No attendance record for this date - consider as absent
-                emp_absent_days += 1
-            
-            emp_total_wages += wage_earned
-            
-            # Map status to readable format
-            status_map = {0: 'Absent', 1: 'Present', 2: 'Half Day', 3: 'Late', None: 'No Record'}
-            
-            daily_data.append({
-                'date': date_str,
-                'day_name': current_date.strftime('%A'),
-                'status': status_map.get(attendance_status),
-                'status_code': attendance_status,
-                'wage_earned': float(wage_earned)
-            })
-            
-            current_date += timedelta(days=1)
-        
-        # Weekly breakdown for this employee
+        # Build weekly breakdown with historical wages
         weekly_breakdown = []
         emp_total_paid = Decimal('0')
         emp_total_pending = Decimal('0')
@@ -1555,7 +2087,7 @@ def single_employee_report(request, employee_id):
             week_absent = len([d for d in week_daily_data if d['status_code'] in [0, None]])
             week_wages = sum(Decimal(str(d['wage_earned'])) for d in week_daily_data)
             
-            # Get payment info from wage record
+            # Get payment info
             week_paid_amount = Decimal('0')
             week_payment_status = 'pending'
             
@@ -1570,6 +2102,9 @@ def single_employee_report(request, employee_id):
             week_pending = week_wages - week_paid_amount
             emp_total_pending += week_pending
             
+            # Check if multiple wage rates were used in this week
+            week_wage_rates = list(set(d['daily_wage_rate'] for d in week_daily_data if d['daily_wage_rate'] > 0))
+            
             weekly_breakdown.append({
                 'week_start': week_start.isoformat(),
                 'week_end': week_end.isoformat(),
@@ -1579,7 +2114,9 @@ def single_employee_report(request, employee_id):
                 'total_wages_earned': float(week_wages),
                 'wages_paid': float(week_paid_amount),
                 'wages_pending': float(week_pending),
-                'payment_status': week_payment_status
+                'payment_status': week_payment_status,
+                'wage_rates_used': week_wage_rates,
+                'multiple_rates': len(week_wage_rates) > 1
             })
         
         # Calculate totals and percentages
@@ -1593,13 +2130,11 @@ def single_employee_report(request, employee_id):
         if float(emp_total_wages) > 0:
             payment_percentage = round(float(emp_total_paid) / float(emp_total_wages) * 100, 2)
         
-        # Build response data structure that matches what Flutter expects
         response_data = {
             'success': True,
             'data': {
                 'employee_id': emp_id,
                 'employee_name': employee.name,
-                'daily_wage': float(daily_wage),
                 'period_summary': {
                     'total_days': total_working_days,
                     'present_days': emp_present_days,
@@ -1613,6 +2148,12 @@ def single_employee_report(request, employee_id):
                 },
                 'daily_attendance': daily_data,
                 'weekly_breakdown': weekly_breakdown,
+                'wage_rate_changes': wage_changes,
+                'historical_wage_calculation': {
+                    'enabled': True,
+                    'total_wage_changes': len(wage_changes),
+                    'date_range_checked': f"{start_date.isoformat()} to {end_date.isoformat()}"
+                },
                 'report_period': {
                     'start_date': start_date.isoformat(),
                     'end_date': end_date.isoformat(),
@@ -1626,7 +2167,7 @@ def single_employee_report(request, employee_id):
         return Response(response_data)
         
     except Exception as e:
-        print(f"Error generating single employee report: {str(e)}")
+        print(f"Error generating historical employee report: {str(e)}")
         import traceback
         traceback.print_exc()
         return Response({
@@ -1634,6 +2175,66 @@ def single_employee_report(request, employee_id):
             'error': f'Failed to generate employee report: {str(e)}',
             'data': None
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    
+@api_view(['GET'])
+def employee_wage_history(request, employee_id):
+    """
+    Get complete wage history for an employee
+    """
+    try:
+        employee = Employee.objects.get(id=employee_id, status=True)
+    except Employee.DoesNotExist:
+        return Response(
+            {'error': f'Employee with ID {employee_id} not found or inactive'}, 
+            status=status.HTTP_404_NOT_FOUND
+        )
+    
+    # Get all wage records for this employee
+    wage_records = Wage.objects.filter(
+        employee=employee
+    ).order_by('effective_from')
+    
+    wage_history = []
+    for wage in wage_records:
+        wage_history.append({
+            'id': wage.id,
+            'amount': float(wage.amount),
+            'effective_from': wage.effective_from.isoformat(),
+            'effective_to': wage.effective_to.isoformat() if wage.effective_to else None,
+            'is_current': wage.effective_to is None,
+            'duration_days': (wage.effective_to - wage.effective_from).days if wage.effective_to else 'Ongoing',
+            'remarks': wage.remarks,
+            'created_at': wage.created_at.isoformat()
+        })
+    
+    # Calculate wage statistics
+    if wage_history:
+        amounts = [w['amount'] for w in wage_history]
+        wage_stats = {
+            'total_wage_changes': len(wage_history),
+            'highest_wage': max(amounts),
+            'lowest_wage': min(amounts),
+            'current_wage': wage_history[-1]['amount'] if wage_history else 0,
+            'first_wage': wage_history[0]['amount'],
+            'total_increase': wage_history[-1]['amount'] - wage_history[0]['amount'] if len(wage_history) > 1 else 0
+        }
+    else:
+        wage_stats = {
+            'total_wage_changes': 0,
+            'highest_wage': 0,
+            'lowest_wage': 0,
+            'current_wage': 0,
+            'first_wage': 0,
+            'total_increase': 0
+        }
+    
+    return Response({
+        'employee_id': str(employee.id),
+        'employee_name': employee.name,
+        'wage_history': wage_history,
+        'wage_statistics': wage_stats,
+        'report_generated_at': timezone.now().isoformat()
+    })
 
 @api_view(['GET'])
 def employee_summary_report(request):
@@ -1905,3 +2506,120 @@ def weekly_wages_report(request):
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
     
+def validate_historical_wages_in_record(wage_record):
+    """
+    Validate that a wage record uses historical wage rates
+    Returns True if valid, False if needs recalculation
+    """
+    for emp_data in wage_record.employee_wages:
+        # Check if historical wage calculation flag exists
+        if not emp_data.get('historical_wage_calculation', {}).get('enabled', False):
+            return False
+        
+        # Check if attendance_details contain daily wage rates
+        attendance_details = emp_data.get('attendance_details', {})
+        if not attendance_details:
+            return False
+        
+        # Verify that daily wage rates exist for each day
+        for date_str, day_data in attendance_details.items():
+            if 'wage_rate' not in day_data:
+                return False
+    
+    return True
+
+@api_view(['GET'])
+def validate_wage_record_historical_rates(request, record_id):
+    """
+    Validate that a wage record uses historical rates and fix if needed
+    """
+    try:
+        wage_record = WeeklyWagePaymentManager.objects.get(id=record_id)
+        
+        is_valid = validate_historical_wages_in_record(wage_record)
+        
+        if not is_valid:
+            print(f"Wage record {record_id} needs historical rate recalculation")
+            wage_record.recalculate_with_historical_rates()
+            is_valid = True
+            message = "Wage record recalculated with historical rates"
+        else:
+            message = "Wage record already uses historical rates"
+        
+        return Response({
+            'wage_record_id': record_id,
+            'uses_historical_rates': is_valid,
+            'message': message,
+            'total_employees': wage_record.total_employees,
+            'total_net_amount': float(wage_record.total_net_amount),
+            'validation_details': {
+                'employees_with_historical_data': len([
+                    emp for emp in wage_record.employee_wages 
+                    if emp.get('historical_wage_calculation', {}).get('enabled', False)
+                ]),
+                'total_employees': len(wage_record.employee_wages)
+            }
+        })
+        
+    except WeeklyWagePaymentManager.DoesNotExist:
+        return Response(
+            {'error': 'Wage record not found'}, 
+            status=status.HTTP_404_NOT_FOUND
+        )
+    except Exception as e:
+        return Response(
+            {'error': f'Validation failed: {str(e)}'}, 
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+@api_view(['POST'])
+def fix_all_wage_records_historical_rates(request):
+    """
+    Fix all existing wage records to use historical rates
+    """
+    try:
+        # Get all wage records that might need fixing
+        wage_records = WeeklyWagePaymentManager.objects.all()
+        
+        fixed_records = []
+        skipped_records = []
+        
+        for wage_record in wage_records:
+            try:
+                if not validate_historical_wages_in_record(wage_record):
+                    print(f"Fixing wage record {wage_record.id} for week {wage_record.week_start_date}")
+                    wage_record.recalculate_with_historical_rates()
+                    fixed_records.append({
+                        'id': wage_record.id,
+                        'week_start': wage_record.week_start_date.isoformat(),
+                        'employees': wage_record.total_employees,
+                        'new_total': float(wage_record.total_net_amount)
+                    })
+                else:
+                    skipped_records.append({
+                        'id': wage_record.id,
+                        'week_start': wage_record.week_start_date.isoformat(),
+                        'reason': 'Already uses historical rates'
+                    })
+                    
+            except Exception as e:
+                print(f"Error fixing wage record {wage_record.id}: {str(e)}")
+                skipped_records.append({
+                    'id': wage_record.id,
+                    'week_start': wage_record.week_start_date.isoformat(),
+                    'reason': f'Error: {str(e)}'
+                })
+        
+        return Response({
+            'message': f'Fixed {len(fixed_records)} wage records with historical rates',
+            'fixed_records': fixed_records,
+            'skipped_records': skipped_records,
+            'total_processed': len(wage_records),
+            'success_rate': len(fixed_records) / len(wage_records) * 100 if wage_records else 0
+        })
+        
+    except Exception as e:
+        return Response(
+            {'error': f'Batch fix failed: {str(e)}'}, 
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )

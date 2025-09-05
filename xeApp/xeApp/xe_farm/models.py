@@ -1,9 +1,11 @@
+import sys
 from django.db import models
 from django.core.validators import MinValueValidator
 from decimal import Decimal
 from django.forms import ValidationError
 from django.utils import timezone
-from datetime import timedelta
+from datetime import datetime, timedelta
+
 
 class Employee(models.Model):
     GENDER_CHOICES = [
@@ -477,9 +479,10 @@ class AttendanceRecord(models.Model):
         return total
 
 
-# models.py - Optimized Weekly Wage Payment Model
+
 
 class WeeklyWagePayment(models.Model):
+    
     """
     Store weekly wage payments as a single record with employee data as JSON array
     Much more efficient than individual records per employee
@@ -620,6 +623,7 @@ class WeeklyWagePayment(models.Model):
             self.payment_status = 'pending'
         else:
             self.payment_status = 'partial'
+
     
     @classmethod
     def generate_weekly_wage_record(cls, week_start_date):
@@ -729,51 +733,73 @@ class WeeklyWagePayment(models.Model):
                 return emp_data
         return None
     
-    def update_employee_payment(self, employee_id, payment_amount, payment_mode='Cash', 
-                              reference='', remarks=''):
+    def update_employee_payment(self, employee_id, payment_amount, payment_mode='Cash', reference='', remarks=''):
         """
-        Update payment for a specific employee
+        Update employee payment with validation against historical wage calculations
         """
-        if payment_amount <= 0:
-            raise ValueError("Payment amount must be greater than 0")
+        employee_id = str(employee_id)
+        employee = Employee.objects.get(id=employee_id)
         
-        # Find employee in the data
+        # Find this employee in the wages data
         employee_found = False
-        for emp_data in self.employee_wages:
-            if str(emp_data.get('employee_id')) == str(employee_id):
+        for i, emp_data in enumerate(self.employee_wages):
+            if emp_data.get('employee_id') == employee_id:
                 employee_found = True
-                
                 current_paid = Decimal(str(emp_data.get('paid_amount', 0)))
                 net_amount = Decimal(str(emp_data.get('net_amount', 0)))
                 
+                # Validate payment doesn't exceed net amount
                 if current_paid + payment_amount > net_amount:
-                    raise ValueError("Payment amount exceeds remaining balance")
+                    raise ValueError(
+                        f"Payment amount ${payment_amount} exceeds remaining balance ${net_amount - current_paid}"
+                    )
                 
                 # Update payment details
-                emp_data['paid_amount'] = float(current_paid + payment_amount)
-                emp_data['remaining_amount'] = float(net_amount - (current_paid + payment_amount))
-                emp_data['payment_mode'] = payment_mode
-                emp_data['payment_reference'] = reference
-                emp_data['payment_date'] = timezone.now().isoformat()
+                new_paid_amount = current_paid + payment_amount
+                remaining_amount = net_amount - new_paid_amount
                 
-                if remarks:
-                    emp_data['remarks'] = remarks
-                
-                # Update payment status
-                if emp_data['remaining_amount'] <= 0:
-                    emp_data['payment_status'] = 'paid'
+                # Determine payment status
+                if remaining_amount <= 0:
+                    payment_status = 'paid'
+                elif new_paid_amount > 0:
+                    payment_status = 'partial'
                 else:
-                    emp_data['payment_status'] = 'partial'
+                    payment_status = 'pending'
+                
+                # Update the employee data
+                self.employee_wages[i].update({
+                    'paid_amount': float(new_paid_amount),
+                    'remaining_amount': float(remaining_amount),
+                    'payment_status': payment_status,
+                    'last_payment_date': timezone.now().date().isoformat(),
+                    'payment_mode': payment_mode,
+                    'payment_reference': reference,
+                    'payment_remarks': remarks
+                })
                 
                 break
         
         if not employee_found:
-            raise ValueError("Employee not found in this week's wage record")
+            raise ValueError(f"Employee {employee.name} not found in this wage record")
         
-        # Save the record (this will trigger summary field updates)
+        # Recalculate totals
+        total_paid = sum(Decimal(str(emp.get('paid_amount', 0))) for emp in self.employee_wages)
+        total_remaining = sum(Decimal(str(emp.get('remaining_amount', 0))) for emp in self.employee_wages)
+        
+        self.total_paid_amount = total_paid
+        self.total_remaining_amount = total_remaining
+        
+        # Update overall payment status
+        if total_remaining <= 0:
+            self.payment_status = 'Fully Paid'
+        elif total_paid > 0:
+            self.payment_status = 'Partial'
+        else:
+            self.payment_status = 'Pending'
+        
         self.save()
-        
-        return self
+        return new_paid_amount
+
     
     def make_bulk_payment(self, payment_mode='Cash', reference='', remarks=''):
         """
@@ -829,6 +855,286 @@ class WeeklyWagePayment(models.Model):
             'employees_pending': len([e for e in self.employee_wages if e.get('payment_status') == 'pending'])
         }
         return summary
+    
+class WeeklyWagePaymentManager:
+    """Updated manager methods for WeeklyWagePayment"""
+    
+    @classmethod
+    def generate_weekly_wage_record_with_historical_rates(cls, week_start_date):
+        """
+        Generate weekly wage record using historical wage rates for each attendance date
+        This replaces the existing generate_weekly_wage_record method
+        """
+        from django.db import transaction
+        from collections import defaultdict
+        from datetime import timedelta
+        # Import your models here
+        from .models import WeeklyWagePayment, AttendanceRecord, Employee  # Adjust import path as needed
+        
+        week_end_date = week_start_date + timedelta(days=6)
+        week_dates = [week_start_date + timedelta(days=i) for i in range(7)]
+        
+        # Check if record already exists - FIXED: Use WeeklyWagePayment.objects
+        existing_record = WeeklyWagePayment.objects.filter(week_start_date=week_start_date).first()
+        if existing_record:
+            return existing_record
+        
+        # Get all attendance records for the week
+        attendance_records = AttendanceRecord.objects.filter(
+            date__in=week_dates
+        )
+        
+        # Build employee wage data using historical rates
+        employee_wages_data = []
+        employees_processed = set()
+        
+        # Process each attendance record
+        for attendance_record in attendance_records:
+            attendance_date = attendance_record.date
+            
+            for emp_attendance in attendance_record.attendance_data:
+                emp_id = emp_attendance.get('employee_id')
+                emp_name = emp_attendance.get('employee_name')
+                status = emp_attendance.get('status')
+                
+                if emp_id not in employees_processed:
+                    employees_processed.add(emp_id)
+                    
+                    try:
+                        employee = Employee.objects.get(id=emp_id, status=True)
+                        
+                        # Calculate wages for this employee across the week using historical rates
+                        employee_week_data = cls._calculate_employee_week_wages_historical(
+                            employee, week_dates, attendance_records
+                        )
+                        
+                        if employee_week_data and employee_week_data['net_amount'] > 0:  # Only include if employee worked
+                            employee_wages_data.append(employee_week_data)
+                            
+                    except Employee.DoesNotExist:
+                        continue
+        
+        # Create the wage record - FIXED: Use WeeklyWagePayment.objects
+        with transaction.atomic():
+            wage_record = WeeklyWagePayment.objects.create(
+                week_start_date=week_start_date,
+                week_end_date=week_end_date,
+                employee_wages=employee_wages_data,
+                total_employees=len(employee_wages_data),
+                total_gross_amount=sum(Decimal(str(emp['gross_amount'])) for emp in employee_wages_data),
+                total_net_amount=sum(Decimal(str(emp['net_amount'])) for emp in employee_wages_data),
+                total_paid_amount=Decimal('0'),
+                total_remaining_amount=sum(Decimal(str(emp['net_amount'])) for emp in employee_wages_data),
+                payment_status='pending'
+            )
+        
+        return wage_record
+
+    @classmethod  
+    def _calculate_employee_week_wages_historical(cls, employee, week_dates, attendance_records):
+        """
+        Calculate employee wages for a week using historical wage rates for each day
+        FIXED: Ensures daily_wage field uses historical rate, not current rate
+        """
+        import sys
+        from decimal import Decimal
+        
+        
+        emp_id = str(employee.id)
+        week_start_date = week_dates[0]  # First date of the week
+        
+        # CRITICAL FIX: Get historical wage rate for the week start date
+        primary_historical_wage = get_wage_for_date(employee, week_start_date)
+        if not primary_historical_wage:
+            # If no historical wage found for week start, try to find any wage for this employee
+            all_wages = employee.wage_set.filter(
+                effective_from__lte=week_start_date
+            ).order_by('-effective_from').first()
+            
+            if not all_wages:
+                print(f"No wage rate found for employee {employee.name} on {week_start_date}", file=sys.stderr)
+                return None
+            
+            primary_historical_wage = all_wages
+        
+        # This should be the historical rate (e.g., 45), not current rate (e.g., 500)
+        primary_daily_wage = primary_historical_wage.amount
+        
+        print(f"Employee {employee.name}: Using historical wage rate {primary_daily_wage} for week {week_start_date}", file=sys.stderr)
+        
+        # Build attendance lookup
+        attendance_lookup = {}
+        for record in attendance_records:
+            attendance_lookup[record.date] = {
+                emp['employee_id']: emp for emp in record.attendance_data
+            }
+        
+        # Calculate attendance and wages day by day with historical rates
+        total_present_days = 0
+        total_half_days = 0
+        total_late_days = 0
+        total_wages = Decimal('0')
+        attendance_details = {}
+        daily_wage_rates_used = []
+        
+        for day_date in week_dates:
+            date_str = day_date.isoformat()
+            
+            # Get historical wage rate for this specific date
+            daily_historical_wage = get_wage_for_date(employee, day_date)
+            daily_wage_for_this_date = daily_historical_wage.amount if daily_historical_wage else primary_daily_wage
+            daily_wage_rates_used.append(float(daily_wage_for_this_date))
+            
+            # Get attendance status for this day
+            attendance_status = None
+            day_wage_earned = Decimal('0')
+            
+            if day_date in attendance_lookup and emp_id in attendance_lookup[day_date]:
+                emp_day_data = attendance_lookup[day_date][emp_id]
+                attendance_status = emp_day_data.get('status')
+                
+                # Calculate wage using historical rate for this specific date
+                if attendance_status == 1:  # Present
+                    day_wage_earned = daily_wage_for_this_date
+                    total_present_days += 1
+                elif attendance_status == 2:  # Half day
+                    day_wage_earned = daily_wage_for_this_date / 2
+                    total_half_days += 1
+                elif attendance_status == 3:  # Late (treat as present)
+                    day_wage_earned = daily_wage_for_this_date
+                    total_late_days += 1
+                    total_present_days += 1  # Count as present for totals
+            
+            total_wages += day_wage_earned
+            
+            # Store detailed attendance with actual wage rate used
+            attendance_details[date_str] = {
+                'status': attendance_status,
+                'wage_rate': float(daily_wage_for_this_date),
+                'wage_earned': float(day_wage_earned),
+                'wage_effective_from': daily_historical_wage.effective_from.isoformat() if daily_historical_wage else primary_historical_wage.effective_from.isoformat(),
+                'wage_effective_to': daily_historical_wage.effective_to.isoformat() if daily_historical_wage and daily_historical_wage.effective_to else None
+            }
+        
+        # Calculate deductions (implement as needed)
+        advance_deduction = Decimal('0')
+        other_deductions = Decimal('0')
+        total_deductions = advance_deduction + other_deductions
+        net_amount = total_wages - total_deductions
+        
+        print(f"Employee {employee.name} calculations:", file=sys.stderr)
+        print(f"  - Primary historical wage: {primary_daily_wage}", file=sys.stderr)
+        print(f"  - Daily rates used: {daily_wage_rates_used}", file=sys.stderr)
+        print(f"  - Total wages: {total_wages}", file=sys.stderr)
+        
+        return {
+            'employee_id': emp_id,
+            'employee_name': employee.name,
+            'present_days': total_present_days,
+            'half_days': total_half_days,
+            'late_days': total_late_days,
+            'daily_wage': float(primary_daily_wage),  # FIXED: This is now historical rate
+            'gross_amount': float(total_wages),
+            'advance_deduction': float(advance_deduction),
+            'other_deductions': float(other_deductions),
+            'total_deductions': float(total_deductions),
+            'net_amount': float(net_amount),
+            'paid_amount': 0.0,
+            'remaining_amount': float(net_amount),
+            'payment_status': 'pending',
+            'payment_mode': '',
+            'payment_date': None,
+            'payment_reference': '',
+            'remarks': '',
+            'attendance_details': attendance_details,
+            'last_payment_date': None,
+            'payment_remarks': '',
+            'historical_wage_calculation': {
+                'enabled': True,
+                'primary_wage_rate': float(primary_daily_wage),
+                'effective_from': primary_historical_wage.effective_from.isoformat(),
+                'effective_to': primary_historical_wage.effective_to.isoformat() if primary_historical_wage.effective_to else None,
+                'daily_rates_used': daily_wage_rates_used,
+                'multiple_rates_in_week': len(set(daily_wage_rates_used)) > 1,
+                'calculation_date': week_start_date.isoformat()
+            }
+        }
+
+
+    def recalculate_with_historical_rates(self):
+        """
+        Recalculate existing wage record using historical rates
+        FIXED: Ensures daily_wage field reflects historical rates
+        """
+        week_dates = [self.week_start_date + timedelta(days=i) for i in range(7)]
+        attendance_records = AttendanceRecord.objects.filter(date__in=week_dates)
+        
+        print(f"Recalculating wage record {self.id} for week {self.week_start_date} with historical rates")
+        
+        # Recalculate each employee's data
+        updated_employee_wages = []
+        
+        for emp_data in self.employee_wages:
+            employee_id = emp_data['employee_id']
+            
+            try:
+                employee = Employee.objects.get(id=employee_id, status=True)
+            except Employee.DoesNotExist:
+                # Keep existing data if employee not found
+                updated_employee_wages.append(emp_data)
+                continue
+            
+            # Get historical wage data for this employee
+            recalculated_data = self._calculate_employee_week_wages_historical(
+                employee, week_dates, attendance_records
+            )
+            
+            if recalculated_data is None:
+                # Keep existing data if calculation failed
+                updated_employee_wages.append(emp_data)
+                continue
+            
+            # Preserve existing payment information
+            paid_amount = Decimal(str(emp_data.get('paid_amount', 0)))
+            payment_status = emp_data.get('payment_status', 'pending')
+            payment_mode = emp_data.get('payment_mode', '')
+            payment_reference = emp_data.get('payment_reference', '')
+            last_payment_date = emp_data.get('last_payment_date')
+            payment_remarks = emp_data.get('payment_remarks', '')
+            
+            # Update with recalculated wage amounts but preserve payments
+            net_amount = Decimal(str(recalculated_data['net_amount']))
+            remaining_amount = net_amount - paid_amount
+            
+            updated_data = {
+                **recalculated_data,  # Use recalculated wage data
+                'paid_amount': float(paid_amount),
+                'remaining_amount': float(remaining_amount),
+                'payment_status': payment_status,
+                'payment_mode': payment_mode,
+                'payment_reference': payment_reference,
+                'last_payment_date': last_payment_date,
+                'payment_remarks': payment_remarks
+            }
+            
+            old_daily_wage = emp_data.get('daily_wage', 0)
+            new_daily_wage = updated_data['daily_wage']
+            
+            print(f"Employee {employee.name}: daily_wage changed from {old_daily_wage} to {new_daily_wage}")
+            
+            updated_employee_wages.append(updated_data)
+        
+        # Update totals
+        self.employee_wages = updated_employee_wages
+        self.total_gross_amount = sum(Decimal(str(emp['gross_amount'])) for emp in updated_employee_wages)
+        self.total_net_amount = sum(Decimal(str(emp['net_amount'])) for emp in updated_employee_wages)
+        self.total_remaining_amount = sum(Decimal(str(emp['remaining_amount'])) for emp in updated_employee_wages)
+        
+        self.save()
+        
+        print(f"Wage record {self.id} successfully recalculated with historical rates")
+        return self
+
 
 class WagePaymentTransaction(models.Model):
     """
@@ -1059,3 +1365,27 @@ class BulkWagePayment(models.Model):
         )
         
         return bulk_payment
+
+def get_wage_for_date(employee, target_date):
+    """
+    Get the wage rate that was effective for an employee on a specific date
+    
+    Args:
+        employee: Employee instance
+        target_date: date object for which wage is needed
+    
+    Returns:
+        Wage instance or None if no wage was effective on that date
+    """
+    from .models import Wage
+    
+    # Find wages that were effective on the target date
+    wages = Wage.objects.filter(
+        employee=employee,
+        effective_from__lte=target_date
+    ).filter(
+        # Either no end date (ongoing) or end date is after target date
+        models.Q(effective_to__isnull=True) | models.Q(effective_to__gte=target_date)
+    ).order_by('-effective_from')  # Get the most recent one if multiple
+    
+    return wages.first() if wages.exists() else None

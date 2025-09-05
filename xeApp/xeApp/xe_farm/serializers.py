@@ -2,7 +2,8 @@ from datetime import date, datetime
 from decimal import Decimal
 from django.db import transaction
 from rest_framework import serializers
-from .models import  AttendanceRecord, BulkWagePayment, Employee,  Merchant, FarmSegment, Crop, CropVariant, Wage, WeeklyWagePayment,  Yield, YieldVariant, YieldFarmSegment, Sale, SaleVariant, Job, JobEmployee,JobFarmSegment, Expense
+
+from .models import  AttendanceRecord, BulkWagePayment, Employee,  Merchant, FarmSegment, Crop, CropVariant, Wage, WeeklyWagePayment,  Yield, YieldVariant, YieldFarmSegment, Sale, SaleVariant, Job, JobEmployee,JobFarmSegment, Expense, get_wage_for_date
 
 # Employee Serializer
 class EmployeeSerializer(serializers.ModelSerializer):
@@ -783,84 +784,79 @@ class AttendanceEmployeeSerializer(serializers.Serializer):
 
 
 class AttendanceCreateUpdateSerializer(serializers.Serializer):
-    """Enhanced serializer for creating/updating attendance with proper validation"""
+    """Enhanced serializer with historical wage validation"""
     date = serializers.DateField()
     attendance_records = AttendanceEmployeeSerializer(many=True)
 
-    def validate_date(self, value):
-        """Validate attendance date"""
-        if value > date.today():
-            raise serializers.ValidationError("Cannot mark attendance for future dates.")
-        return value
-
     def validate_attendance_records(self, value):
-        """Validate attendance records list"""
+        """Validate attendance records with historical wage checks"""
         if not value:
             raise serializers.ValidationError("At least one employee attendance record is required.")
         
-        # Check for duplicate employee IDs in the same request
+        attendance_date = self.initial_data.get('date')
+        if attendance_date:
+            try:
+                target_date = datetime.strptime(attendance_date, '%Y-%m-%d').date()
+            except ValueError:
+                raise serializers.ValidationError("Invalid date format.")
+        else:
+            raise serializers.ValidationError("Date is required for wage validation.")
+        
+        # Check for duplicate employee IDs
         employee_ids = [record['employee_id'] for record in value]
         if len(employee_ids) != len(set(employee_ids)):
             duplicates = [emp_id for emp_id in set(employee_ids) if employee_ids.count(emp_id) > 1]
             raise serializers.ValidationError(
-                f"Duplicate employee IDs found: {duplicates}. Each employee can only have one attendance record per date."
+                f"Duplicate employee IDs found: {duplicates}"
+            )
+        
+        # Validate each employee has a wage rate for the target date
+        employees_without_wages = []
+        for record in value:
+            employee_id = record['employee_id']
+            try:
+                employee = Employee.objects.get(id=employee_id, status=True)
+                historical_wage = get_wage_for_date(employee, target_date)
+                
+                if not historical_wage:
+                    employees_without_wages.append(f"{employee.name} (ID: {employee_id})")
+                    
+            except Employee.DoesNotExist:
+                raise serializers.ValidationError(
+                    f"Employee with ID {employee_id} does not exist or is inactive"
+                )
+        
+        if employees_without_wages:
+            raise serializers.ValidationError(
+                f"The following employees don't have wage rates for {target_date}: {', '.join(employees_without_wages)}"
             )
         
         return value
 
-    def validate(self, data):
-        """Cross-field validation"""
-        attendance_date = data.get('date')
-        attendance_records = data.get('attendance_records', [])
-        
-        # Check if trying to update attendance for a week where wages are already paid
-        if attendance_date:
-            from .utils import get_monday_of_week  # Import here to avoid circular import
-            week_start = get_monday_of_week(attendance_date)
-            
-            # Check if any wages are paid for this week
-            employee_ids = [record['employee_id'] for record in attendance_records]
-            paid_wages_exist = WeeklyWagePayment.objects.filter(
-                employee_id__in=employee_ids,
-                week_start_date=week_start,
-                payment_status='paid'
-            ).exists()
-            
-            if paid_wages_exist:
-                raise serializers.ValidationError(
-                    "Cannot mark/update attendance. Wages already paid for some employees for this week."
-                )
-        
-        return data
-
     def create(self, validated_data):
-        """Create attendance record with validated data"""
+        """Create attendance record with historical wage amounts"""
         attendance_date = validated_data['date']
         attendance_records = validated_data['attendance_records']
         
         with transaction.atomic():
-            # Prepare attendance data with proper wage amounts
             attendance_data = []
             for record_data in attendance_records:
                 employee_id = record_data['employee_id']
-                
-                # Get employee and current wage (already validated in serializer)
                 employee = Employee.objects.get(id=employee_id, status=True)
-                current_wage = Wage.get_current_wage(employee)
                 
-                # Use provided wage_amount or get from current wage
-                wage_amount = record_data.get('wage_amount')
-                if not wage_amount:
-                    wage_amount = current_wage.amount if current_wage else Decimal('0')
+                # FIXED: Get historical wage for the attendance date
+                historical_wage = get_wage_for_date(employee, attendance_date)
+                wage_amount = historical_wage.amount if historical_wage else Decimal('0')
                 
                 attendance_data.append({
                     'employee_id': employee_id,
-                    'employee_name': employee.name,  # Use actual name from DB
+                    'employee_name': employee.name,
                     'status': record_data['status'],
-                    'wage_amount': float(wage_amount)
+                    'wage_amount': float(wage_amount),
+                    'wage_effective_from': historical_wage.effective_from.isoformat() if historical_wage else None,
+                    'wage_effective_to': historical_wage.effective_to.isoformat() if historical_wage and historical_wage.effective_to else None
                 })
             
-            # Create or update attendance record
             attendance_record, created = AttendanceRecord.objects.update_or_create(
                 date=attendance_date,
                 defaults={
@@ -871,33 +867,32 @@ class AttendanceCreateUpdateSerializer(serializers.Serializer):
             return attendance_record
 
     def update(self, instance, validated_data):
-        """Update attendance record with validated data"""
+        """Update attendance record with historical wage amounts"""
+        attendance_date = instance.date
         attendance_records = validated_data['attendance_records']
         
-        # Prepare new attendance data
         attendance_data = []
         for record_data in attendance_records:
             employee_id = record_data['employee_id']
-            
-            # Get employee and current wage (already validated in serializer)
             employee = Employee.objects.get(id=employee_id, status=True)
-            current_wage = Wage.get_current_wage(employee)
             
-            # Use provided wage_amount or get from current wage
-            wage_amount = record_data.get('wage_amount')
-            if not wage_amount:
-                wage_amount = current_wage.amount if current_wage else Decimal('0')
+            # FIXED: Get historical wage for the attendance date
+            historical_wage = get_wage_for_date(employee, attendance_date)
+            wage_amount = historical_wage.amount if historical_wage else Decimal('0')
             
             attendance_data.append({
                 'employee_id': employee_id,
-                'employee_name': employee.name,  # Use actual name from DB
+                'employee_name': employee.name,
                 'status': record_data['status'],
-                'wage_amount': float(wage_amount)
+                'wage_amount': float(wage_amount),
+                'wage_effective_from': historical_wage.effective_from.isoformat() if historical_wage else None,
+                'wage_effective_to': historical_wage.effective_to.isoformat() if historical_wage and historical_wage.effective_to else None
             })
         
         instance.attendance_data = attendance_data
         instance.save()
         return instance
+
 
 
 class AttendanceRecordSerializer(serializers.ModelSerializer):

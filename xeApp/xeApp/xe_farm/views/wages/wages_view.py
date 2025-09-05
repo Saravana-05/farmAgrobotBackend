@@ -133,7 +133,6 @@ def save_wage_data(request):
                     wage = serializer.save()
                     successful_wages.append(wage)
                     
-                    # FIXED: Removed Unicode emoji characters
                     print(f"SUCCESS: Created wage for {employee.name}: Rs.{wage.amount}")
                     
                 except Exception as e:
@@ -142,7 +141,6 @@ def save_wage_data(request):
                         'employee_name': employee.name,
                         'error': f'Error creating wage: {str(e)}'
                     })
-                    # FIXED: Removed Unicode emoji characters
                     print(f"ERROR: Failed to create wage for {employee.name}: {e}")
         
         # Prepare response
@@ -218,7 +216,7 @@ def get_wage_list(request):
         employee_id = request.GET.get('employee_id', '').strip()
         current_only = request.GET.get('current_only', '').strip().lower() == 'true'
         
-        # Debug logging - FIXED: Removed emoji characters
+        # Debug logging
         print(f"[DEBUG] Date filter params received:")
         print(f"[DEBUG] from_date: {request.GET.get('from_date', 'None')}")
         print(f"[DEBUG] to_date: {request.GET.get('to_date', 'None')}")
@@ -265,7 +263,7 @@ def get_wage_list(request):
             except Exception as e:
                 print(f"[ERROR] Error parsing max_amount: {e}")
         
-        # Apply date filters - FIXED LOGIC
+        # Apply date filters
         from_date = request.GET.get('from_date', '').strip()
         if from_date:
             try:
@@ -284,8 +282,7 @@ def get_wage_list(request):
         if to_date:
             try:
                 to_date_obj = datetime.strptime(to_date, '%Y-%m-%d').date()
-                # FIXED: Filter wages that start on or before the to_date
-                # This makes more sense for date range filtering
+                # Filter wages that start on or before the to_date
                 wages = wages.filter(effective_from__lte=to_date_obj)
                 print(f"[DEBUG] Applied to_date filter: {to_date_obj}")
             except Exception as e:
@@ -472,16 +469,13 @@ def save_bulk_wage_data(request):
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
-# Keep all your existing functions (get_wage_detail, edit_wage_data, etc.) unchanged
-# They remain the same as in your original code
-
 @api_view(['GET'])
 def get_wage_detail(request, wage_id):
     """
-    Get detailed information for a specific wage by ID - FIXED
+    Get detailed information for a specific wage by ID
     """
     try:
-        print(f"🔍 Fetching wage detail for ID: {wage_id}")
+        print(f"Fetching wage detail for ID: {wage_id}")
         
         # Get wage by ID or return 404
         wage = get_object_or_404(
@@ -489,13 +483,13 @@ def get_wage_detail(request, wage_id):
             id=wage_id
         )
         
-        print(f"📋 Found wage: Employee={wage.employee.name}, Amount={wage.amount}")
+        print(f"Found wage: Employee={wage.employee.name}, Amount={wage.amount}")
         
         # Serialize the wage data
         serializer = WageSerializer(wage)
         serialized_data = serializer.data
         
-        print(f"📤 Serialized data: {serialized_data}")
+        print(f"Serialized data: {serialized_data}")
         
         return Response({
             'success': True,
@@ -505,7 +499,7 @@ def get_wage_detail(request, wage_id):
         }, status=status.HTTP_200_OK)
         
     except Exception as e:
-        print(f"❌ Error in get_wage_detail: {e}")
+        print(f"Error in get_wage_detail: {e}")
         return Response({
             'success': False,
             'status': 'error',
@@ -519,15 +513,15 @@ def edit_wage_data(request, wage_id):
     Edit wage data - FIXED VERSION
     """
     try:
-        print(f"🔄 Starting wage edit for ID: {wage_id}")
-        print(f"📥 Request data: {request.data}")
+        print(f"Starting wage edit for ID: {wage_id}")
+        print(f"Request data: {request.data}")
         
         # Get the wage instance
         try:
             wage = Wage.objects.select_related('employee').get(id=wage_id)
-            print(f"📋 Found existing wage: Employee={wage.employee.name}, Amount={wage.amount}")
+            print(f"Found existing wage: Employee={wage.employee.name}, Amount={wage.amount}")
         except Wage.DoesNotExist:
-            print(f"❌ Wage not found with ID: {wage_id}")
+            print(f"Wage not found with ID: {wage_id}")
             return Response({
                 'success': False,
                 'status': 'error',
@@ -536,7 +530,7 @@ def edit_wage_data(request, wage_id):
         
         # Check if request has any data
         if not request.data:
-            print("❌ No data received in request")
+            print("No data received in request")
             return Response({
                 'success': False,
                 'status': 'error',
@@ -545,17 +539,61 @@ def edit_wage_data(request, wage_id):
         
         # Create a copy of request data for processing
         wage_data = request.data.copy()
+        print(f"Original wage_data: {wage_data}")
         
-        # Handle employee field - convert to employee_id if needed
+        # CRITICAL FIX: Handle employee field conversion properly
+        employee_id_to_validate = None
         if 'employee' in wage_data:
-            wage_data['employee_id'] = wage_data.pop('employee')
-            print(f"🔄 Converted 'employee' to 'employee_id': {wage_data['employee_id']}")
+            employee_id_to_validate = wage_data['employee']
+            # Remove 'employee' and add 'employee_id' for serializer
+            wage_data.pop('employee')
+            wage_data['employee_id'] = employee_id_to_validate
+            print(f"Converted 'employee' to 'employee_id': {employee_id_to_validate}")
+        
+        # CRITICAL FIX: Validate employee exists before serializer validation
+        if employee_id_to_validate is not None:
+            try:
+                # Handle both string and int IDs
+                if isinstance(employee_id_to_validate, str):
+                    employee_id_to_validate = int(employee_id_to_validate)
+                
+                # Check if employee exists and is active
+                employee = Employee.objects.get(id=employee_id_to_validate)
+                print(f"Found employee: {employee.name} (ID: {employee.id}, Active: {employee.status})")
+                
+                if not employee.status:
+                    print(f"Employee {employee.name} is inactive")
+                    return Response({
+                        'success': False,
+                        'status': 'error',
+                        'message': f'Cannot assign wage to inactive employee: {employee.name}'
+                    }, status=status.HTTP_400_BAD_REQUEST)
+                    
+                # Update wage_data with the validated employee ID
+                wage_data['employee_id'] = employee.id
+                
+            except Employee.DoesNotExist:
+                print(f"Employee not found with ID: {employee_id_to_validate}")
+                return Response({
+                    'success': False,
+                    'status': 'error',
+                    'message': f'Employee with ID {employee_id_to_validate} not found'
+                }, status=status.HTTP_404_NOT_FOUND)
+            except (ValueError, TypeError) as e:
+                print(f"Invalid employee ID format: {employee_id_to_validate}, Error: {e}")
+                return Response({
+                    'success': False,
+                    'status': 'error',
+                    'message': f'Invalid employee ID format: {employee_id_to_validate}'
+                }, status=status.HTTP_400_BAD_REQUEST)
+        
+        print(f"Final wage_data for serializer: {wage_data}")
         
         # Validate the wage data (partial update allowed)
         serializer = WageSerializer(wage, data=wage_data, partial=True)
         
         if not serializer.is_valid():
-            print(f"❌ Validation failed: {serializer.errors}")
+            print(f"Validation failed: {serializer.errors}")
             return Response({
                 'success': False,
                 'status': 'error',
@@ -564,26 +602,16 @@ def edit_wage_data(request, wage_id):
             }, status=status.HTTP_400_BAD_REQUEST)
         
         validated_data = serializer.validated_data
-        print(f"✅ Validation passed: {validated_data}")
-        
-        # Check if employee is being changed and is active
-        employee = validated_data.get('employee', wage.employee)
-        if not employee.status:
-            print(f"❌ Employee {employee.name} is inactive")
-            return Response({
-                'success': False,
-                'status': 'error',
-                'message': 'Cannot assign wage to inactive employee'
-            }, status=status.HTTP_400_BAD_REQUEST)
+        print(f"Validation passed: {validated_data}")
         
         # Update wage record
         for attr, value in validated_data.items():
             old_value = getattr(wage, attr, None)
             setattr(wage, attr, value)
-            print(f"🔄 Updated {attr}: {old_value} -> {value}")
+            print(f"Updated {attr}: {old_value} -> {value}")
         
         wage.save()
-        print(f"✅ Wage saved successfully")
+        print(f"Wage saved successfully")
         
         # Return success response
         response_serializer = WageSerializer(wage)
@@ -595,7 +623,7 @@ def edit_wage_data(request, wage_id):
         }, status=status.HTTP_200_OK)
         
     except Exception as e:
-        print(f"❌ Exception in edit_wage_data: {e}")
+        print(f"Exception in edit_wage_data: {e}")
         import traceback
         traceback.print_exc()
         return Response({
@@ -751,7 +779,6 @@ def delete_wage(request, wage_id):
             'message': 'Wage record deleted successfully',
             'data': wage_data
         }, status=status.HTTP_200_OK)
-        
     except Exception as e:
         return Response({
             'status': 'error',
@@ -773,8 +800,15 @@ def end_current_wage(request, wage_id):
         # Get the wage object
         wage = get_object_or_404(Wage.objects.select_related('employee'), id=wage_id)
         
-        # Check if wage is currently active
-        if not wage.is_current:
+        # Check if wage is currently active (assumes you have an is_current property/method)
+        # If you don't have is_current, you can check manually:
+        today = date.today()
+        is_currently_active = (
+            wage.effective_from <= today and 
+            (wage.effective_to is None or wage.effective_to >= today)
+        )
+        
+        if not is_currently_active:
             return Response({
                 'status': 'error',
                 'message': 'This wage is not currently active'
@@ -807,19 +841,22 @@ def end_current_wage(request, wage_id):
                 'message': 'End date cannot be before the effective from date'
             }, status=status.HTTP_400_BAD_REQUEST)
         
-        # Update the wage
+        # Update the wage with end date
         wage.effective_to = end_date
-        wage.save(update_fields=['effective_to', 'updated_at'])
+        wage.save(update_fields=['effective_to'])
         
-        # Return success response
+        # Return success response with updated wage data
         response_serializer = WageSerializer(wage)
         return Response({
             'status': 'success',
-            'message': 'Wage ended successfully',
+            'message': f'Wage ended successfully on {end_date.strftime("%Y-%m-%d")}',
             'data': response_serializer.data
         }, status=status.HTTP_200_OK)
         
     except Exception as e:
+        print(f"Error in end_current_wage: {e}")
+        import traceback
+        traceback.print_exc()
         return Response({
             'status': 'error',
             'message': f'Internal server error: {str(e)}'
