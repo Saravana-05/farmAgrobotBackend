@@ -20,8 +20,9 @@ def save_crop_data(request):
         
         # Debug logging
         print(f"Request data: {request.data}")
+        print(f"Request files: {request.FILES}")
         
-        # Validate the crop data
+        # Validate the crop data (including image if provided)
         serializer = CropSerializer(data=request.data)
         
         if not serializer.is_valid():
@@ -78,7 +79,7 @@ def get_all_crops(request):
     """
     try:
         crops = Crop.objects.all().order_by('-created_at')
-        serializer = CropSerializer(crops, many=True)
+        serializer = CropSerializer(crops, many=True, context={'request': request})
         
         return Response({
             'status': 'success',
@@ -101,7 +102,7 @@ def get_crop_by_id(request, crop_id):
     """
     try:
         crop = Crop.objects.get(id=crop_id)
-        serializer = CropSerializer(crop)
+        serializer = CropSerializer(crop, context={'request': request})
         
         return Response({
             'status': 'success',
@@ -130,8 +131,12 @@ def update_crop_data(request, crop_id):
     try:
         crop = Crop.objects.get(id=crop_id)
         
-        # Validate the updated data
-        serializer = CropSerializer(crop, data=request.data, partial=True)
+        # Debug logging
+        print(f"Update request data: {request.data}")
+        print(f"Update request files: {request.FILES}")
+        
+        # Validate the updated data (including image if provided)
+        serializer = CropSerializer(crop, data=request.data, partial=True, context={'request': request})
         
         if not serializer.is_valid():
             return Response({
@@ -182,6 +187,15 @@ def delete_crop(request, crop_id):
     """
     try:
         crop = Crop.objects.get(id=crop_id)
+        
+        # Delete the crop image file if it exists
+        if crop.crop_image:
+            try:
+                crop.crop_image.delete(save=False)
+                print(f"Deleted image file: {crop.crop_image.name}")
+            except Exception as img_error:
+                print(f"Error deleting image file: {img_error}")
+        
         crop.delete()
         
         return Response({

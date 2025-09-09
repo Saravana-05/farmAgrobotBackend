@@ -75,6 +75,7 @@ class FarmSegment(models.Model):
     
 class Crop(models.Model):
     crop_name = models.CharField(max_length=255, verbose_name="Crop Name")
+    crop_image = models.ImageField(upload_to='crops/', null=True, blank=True, verbose_name="Crop Image")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     

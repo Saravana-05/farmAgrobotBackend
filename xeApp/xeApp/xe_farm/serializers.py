@@ -1,5 +1,6 @@
 from datetime import date, datetime
 from decimal import Decimal
+from django.conf import settings
 from django.db import transaction
 from rest_framework import serializers
 
@@ -78,10 +79,25 @@ class FarmSegmentSerializer(serializers.ModelSerializer):
 
 # Crop Serializer
 class CropSerializer(serializers.ModelSerializer):
+    crop_image_url = serializers.SerializerMethodField()
+    
     class Meta:
         model = Crop
-        fields = ['id','crop_name', 'created_at', 'updated_at']
-        read_only_fields = ['id','created_at', 'updated_at']
+        fields = ['id', 'crop_name', 'crop_image', 'crop_image_url', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'created_at', 'updated_at', 'crop_image_url']
+    
+    def get_crop_image_url(self, obj):
+        """
+        Return full URL for crop image if it exists
+        """
+        if obj.crop_image:
+            request = self.context.get('request')
+            if request:
+                return request.build_absolute_uri(obj.crop_image.url)
+            else:
+                # Fallback if request context is not available
+                return f"{settings.MEDIA_URL}{obj.crop_image.name}"
+        return None
     
     def validate_crop_name(self, value):
         """
@@ -94,6 +110,35 @@ class CropSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Crop name must be at least 2 characters long")
         
         return value.strip()
+    
+    def validate_crop_image(self, value):
+        """
+        Validate crop image if provided
+        """
+        if value:
+            # Check file size (limit to 5MB)
+            if value.size > 5 * 1024 * 1024:
+                raise serializers.ValidationError("Image file size should not exceed 5MB")
+            
+            # Check file type
+            allowed_types = ['image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp']
+            if value.content_type not in allowed_types:
+                raise serializers.ValidationError("Only JPEG, PNG, GIF, and WebP images are allowed")
+        
+        return value
+    
+    def update(self, instance, validated_data):
+        """
+        Update crop instance, handling image replacement
+        """
+        # If a new image is provided, delete the old one
+        if 'crop_image' in validated_data and validated_data['crop_image'] and instance.crop_image:
+            try:
+                instance.crop_image.delete(save=False)
+            except Exception as e:
+                print(f"Error deleting old image: {e}")
+        
+        return super().update(instance, validated_data)
 
 # Crop Variant Serializer
 class CropVariantSerializer(serializers.ModelSerializer):
