@@ -239,3 +239,4 @@ def delete_crop_variant(request, variant_id):
             'status': 'error',
             'message': f'An error occurred: {str(e)}'
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+

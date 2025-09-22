@@ -1,3 +1,5 @@
+from calendar import monthrange
+from itertools import count
 from rest_framework import status
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
@@ -642,3 +644,461 @@ def _delete_expense_image(image_url):
     except Exception as e:
         print(f"Error deleting image {image_url}: {e}")
         logger.warning(f"Failed to delete expense image {image_url}: {str(e)}")
+
+
+
+@api_view(['GET'])
+def get_expense_dashboard_stats(request):
+    """
+    Get comprehensive expense statistics for dashboard
+    Including: current year, last year, current month, last month, whole year data
+    """
+    try:
+        # Get current date info
+        today = timezone.now().date()
+        current_year = today.year
+        current_month = today.month
+        
+        # Date ranges
+        current_year_start = today.replace(month=1, day=1)
+        current_year_end = today.replace(month=12, day=31)
+        
+        last_year = current_year - 1
+        last_year_start = today.replace(year=last_year, month=1, day=1)
+        last_year_end = today.replace(year=last_year, month=12, day=31)
+        
+        current_month_start = today.replace(day=1)
+        # Get last day of current month
+        last_day_current_month = monthrange(current_year, current_month)[1]
+        current_month_end = today.replace(day=last_day_current_month)
+        
+        # Last month calculation
+        if current_month == 1:
+            last_month_year = current_year - 1
+            last_month_num = 12
+        else:
+            last_month_year = current_year
+            last_month_num = current_month - 1
+        
+        last_month_start = today.replace(year=last_month_year, month=last_month_num, day=1)
+        last_day_last_month = monthrange(last_month_year, last_month_num)[1]
+        last_month_end = today.replace(year=last_month_year, month=last_month_num, day=last_day_last_month)
+        
+        # Last 30 days
+        last_30_days = today - timedelta(days=30)
+        
+        # Time period statistics
+        time_periods = {}
+        
+        # Current Year
+        current_year_expenses = Expense.objects.filter(date__range=[current_year_start, current_year_end])
+        time_periods['current_year'] = {
+            'count': current_year_expenses.count(),
+            'amount': float(current_year_expenses.aggregate(total=Sum('amount'))['total'] or 0),
+            'period_name': f'Current Year ({current_year})',
+            'start_date': current_year_start.isoformat(),
+            'end_date': current_year_end.isoformat()
+        }
+        
+        # Last Year
+        last_year_expenses = Expense.objects.filter(date__range=[last_year_start, last_year_end])
+        time_periods['last_year'] = {
+            'count': last_year_expenses.count(),
+            'amount': float(last_year_expenses.aggregate(total=Sum('amount'))['total'] or 0),
+            'period_name': f'Last Year ({last_year})',
+            'start_date': last_year_start.isoformat(),
+            'end_date': last_year_end.isoformat()
+        }
+        
+        # Current Month
+        current_month_expenses = Expense.objects.filter(date__range=[current_month_start, current_month_end])
+        time_periods['current_month'] = {
+            'count': current_month_expenses.count(),
+            'amount': float(current_month_expenses.aggregate(total=Sum('amount'))['total'] or 0),
+            'period_name': f'Current Month ({today.strftime("%B %Y")})',
+            'start_date': current_month_start.isoformat(),
+            'end_date': current_month_end.isoformat()
+        }
+        
+        # Last Month
+        last_month_expenses = Expense.objects.filter(date__range=[last_month_start, last_month_end])
+        month_name = last_month_start.strftime("%B %Y")
+        time_periods['last_month'] = {
+            'count': last_month_expenses.count(),
+            'amount': float(last_month_expenses.aggregate(total=Sum('amount'))['total'] or 0),
+            'period_name': f'Last Month ({month_name})',
+            'start_date': last_month_start.isoformat(),
+            'end_date': last_month_end.isoformat()
+        }
+        
+        # Last 30 Days
+        last_30_days_expenses = Expense.objects.filter(date__gte=last_30_days)
+        time_periods['last_30_days'] = {
+            'count': last_30_days_expenses.count(),
+            'amount': float(last_30_days_expenses.aggregate(total=Sum('amount'))['total'] or 0),
+            'period_name': 'Last 30 Days',
+            'start_date': last_30_days.isoformat(),
+            'end_date': today.isoformat()
+        }
+        
+        # All Time (Whole Year Data)
+        all_expenses = Expense.objects.all()
+        time_periods['all_time'] = {
+            'count': all_expenses.count(),
+            'amount': float(all_expenses.aggregate(total=Sum('amount'))['total'] or 0),
+            'period_name': 'All Time',
+            'start_date': None,
+            'end_date': None
+        }
+        
+        # Category-wise statistics for current year
+        category_stats = []
+        for choice in Expense.CATEGORY_CHOICES:
+            category_expenses = current_year_expenses.filter(category=choice[0])
+            count = category_expenses.count()
+            amount = category_expenses.aggregate(total=Sum('amount'))['total'] or 0
+            
+            category_stats.append({
+                'category': choice[0],
+                'category_display': choice[1],
+                'count': count,
+                'amount': float(amount),
+                'percentage': round((float(amount) / time_periods['current_year']['amount'] * 100) if time_periods['current_year']['amount'] > 0 else 0, 2)
+            })
+        
+        # Payment mode statistics for current year
+        payment_mode_stats = []
+        for choice in Expense.PAYMENT_MODE_CHOICES:
+            mode_expenses = current_year_expenses.filter(mode_of_payment=choice[0])
+            count = mode_expenses.count()
+            amount = mode_expenses.aggregate(total=Sum('amount'))['total'] or 0
+            
+            payment_mode_stats.append({
+                'mode_of_payment': choice[0],
+                'mode_display': choice[1],
+                'count': count,
+                'amount': float(amount),
+                'percentage': round((float(amount) / time_periods['current_year']['amount'] * 100) if time_periods['current_year']['amount'] > 0 else 0, 2)
+            })
+        
+        # Top spenders for current year
+        top_spenders = current_year_expenses.values('spent_by').annotate(
+            total_count=count('id'),
+            total_amount=Sum('amount')
+        ).order_by('-total_amount')[:10]
+        
+        top_spenders_list = []
+        for spender in top_spenders:
+            top_spenders_list.append({
+                'spent_by': spender['spent_by'],
+                'count': spender['total_count'],
+                'amount': float(spender['total_amount']),
+                'percentage': round((float(spender['total_amount']) / time_periods['current_year']['amount'] * 100) if time_periods['current_year']['amount'] > 0 else 0, 2)
+            })
+        
+        return Response({
+            'status': 'success',
+            'message': 'Dashboard statistics retrieved successfully',
+            'data': {
+                'time_periods': time_periods,
+                'current_year_breakdown': {
+                    'category_stats': category_stats,
+                    'payment_mode_stats': payment_mode_stats,
+                    'top_spenders': top_spenders_list
+                },
+                'generated_at': timezone.now().isoformat()
+            }
+        }, status=status.HTTP_200_OK)
+        
+    except Exception as e:
+        logger.error(f"Error retrieving dashboard statistics: {str(e)}")
+        return Response({
+            'status': 'error',
+            'message': f'Internal server error: {str(e)}'
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['GET'])
+def get_monthly_trend_data(request):
+    """
+    Get monthly expense trends for the current and last year
+    """
+    try:
+        today = timezone.now().date()
+        current_year = today.year
+        last_year = current_year - 1
+        
+        monthly_data = []
+        
+        # Get data for both years
+        for year in [last_year, current_year]:
+            for month in range(1, 13):
+                # Skip future months in current year
+                if year == current_year and month > today.month:
+                    continue
+                    
+                month_start = datetime(year, month, 1).date()
+                last_day = monthrange(year, month)[1]
+                month_end = datetime(year, month, last_day).date()
+                
+                month_expenses = Expense.objects.filter(
+                    date__range=[month_start, month_end]
+                )
+                
+                count = month_expenses.count()
+                amount = month_expenses.aggregate(total=Sum('amount'))['total'] or 0
+                
+                monthly_data.append({
+                    'year': year,
+                    'month': month,
+                    'month_name': month_start.strftime('%B'),
+                    'month_year': month_start.strftime('%b %Y'),
+                    'count': count,
+                    'amount': float(amount),
+                    'start_date': month_start.isoformat(),
+                    'end_date': month_end.isoformat()
+                })
+        
+        return Response({
+            'status': 'success',
+            'message': 'Monthly trend data retrieved successfully',
+            'data': {
+                'monthly_trends': monthly_data,
+                'generated_at': timezone.now().isoformat()
+            }
+        }, status=status.HTTP_200_OK)
+        
+    except Exception as e:
+        logger.error(f"Error retrieving monthly trend data: {str(e)}")
+        return Response({
+            'status': 'error',
+            'message': f'Internal server error: {str(e)}'
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['GET'])
+def get_expense_comparison_stats(request):
+    """
+    Get comparative statistics between different periods
+    """
+    try:
+        today = timezone.now().date()
+        current_year = today.year
+        current_month = today.month
+        
+        # Calculate date ranges
+        current_year_start = today.replace(month=1, day=1)
+        last_year = current_year - 1
+        last_year_start = today.replace(year=last_year, month=1, day=1)
+        last_year_end = today.replace(year=last_year, month=12, day=31)
+        
+        current_month_start = today.replace(day=1)
+        if current_month == 1:
+            last_month_year = current_year - 1
+            last_month_num = 12
+        else:
+            last_month_year = current_year
+            last_month_num = current_month - 1
+        last_month_start = today.replace(year=last_month_year, month=last_month_num, day=1)
+        last_day_last_month = monthrange(last_month_year, last_month_num)[1]
+        last_month_end = today.replace(year=last_month_year, month=last_month_num, day=last_day_last_month)
+        
+        # Get statistics
+        current_year_stats = Expense.objects.filter(date__gte=current_year_start).aggregate(
+            count=count('id'), total=Sum('amount')
+        )
+        last_year_stats = Expense.objects.filter(date__range=[last_year_start, last_year_end]).aggregate(
+            count=count('id'), total=Sum('amount')
+        )
+        current_month_stats = Expense.objects.filter(date__gte=current_month_start).aggregate(
+            count=count('id'), total=Sum('amount')
+        )
+        last_month_stats = Expense.objects.filter(date__range=[last_month_start, last_month_end]).aggregate(
+            count=count('id'), total=Sum('amount')
+        )
+        
+        # Calculate percentage changes
+        def calculate_percentage_change(current, previous):
+            if previous == 0:
+                return 100 if current > 0 else 0
+            return round(((current - previous) / previous) * 100, 2)
+        
+        current_year_amount = float(current_year_stats['total'] or 0)
+        last_year_amount = float(last_year_stats['total'] or 0)
+        current_month_amount = float(current_month_stats['total'] or 0)
+        last_month_amount = float(last_month_stats['total'] or 0)
+        
+        yearly_change = calculate_percentage_change(current_year_amount, last_year_amount)
+        monthly_change = calculate_percentage_change(current_month_amount, last_month_amount)
+        
+        return Response({
+            'status': 'success',
+            'message': 'Comparison statistics retrieved successfully',
+            'data': {
+                'yearly_comparison': {
+                    'current_year': {
+                        'amount': current_year_amount,
+                        'count': current_year_stats['count'] or 0
+                    },
+                    'last_year': {
+                        'amount': last_year_amount,
+                        'count': last_year_stats['count'] or 0
+                    },
+                    'percentage_change': yearly_change,
+                    'trend': 'up' if yearly_change > 0 else 'down' if yearly_change < 0 else 'stable'
+                },
+                'monthly_comparison': {
+                    'current_month': {
+                        'amount': current_month_amount,
+                        'count': current_month_stats['count'] or 0
+                    },
+                    'last_month': {
+                        'amount': last_month_amount,
+                        'count': last_month_stats['count'] or 0
+                    },
+                    'percentage_change': monthly_change,
+                    'trend': 'up' if monthly_change > 0 else 'down' if monthly_change < 0 else 'stable'
+                },
+                'generated_at': timezone.now().isoformat()
+            }
+        }, status=status.HTTP_200_OK)
+        
+    except Exception as e:
+        logger.error(f"Error retrieving comparison statistics: {str(e)}")
+        return Response({
+            'status': 'error',
+            'message': f'Internal server error: {str(e)}'
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['GET'])
+def get_expense_summary_by_period(request, period_type):
+    """
+    Get expense summary for a specific period type
+    
+    Parameters:
+    - period_type: 'current_year', 'last_year', 'current_month', 'last_month', 'all_time'
+    """
+    try:
+        today = timezone.now().date()
+        current_year = today.year
+        current_month = today.month
+        
+        # Determine date range based on period_type
+        if period_type == 'current_year':
+            start_date = today.replace(month=1, day=1)
+            end_date = today.replace(month=12, day=31)
+            period_name = f'Current Year ({current_year})'
+        elif period_type == 'last_year':
+            last_year = current_year - 1
+            start_date = today.replace(year=last_year, month=1, day=1)
+            end_date = today.replace(year=last_year, month=12, day=31)
+            period_name = f'Last Year ({last_year})'
+        elif period_type == 'current_month':
+            start_date = today.replace(day=1)
+            last_day = monthrange(current_year, current_month)[1]
+            end_date = today.replace(day=last_day)
+            period_name = f'Current Month ({today.strftime("%B %Y")})'
+        elif period_type == 'last_month':
+            if current_month == 1:
+                last_month_year = current_year - 1
+                last_month_num = 12
+            else:
+                last_month_year = current_year
+                last_month_num = current_month - 1
+            start_date = today.replace(year=last_month_year, month=last_month_num, day=1)
+            last_day = monthrange(last_month_year, last_month_num)[1]
+            end_date = today.replace(year=last_month_year, month=last_month_num, day=last_day)
+            period_name = f'Last Month ({start_date.strftime("%B %Y")})'
+        elif period_type == 'all_time':
+            start_date = None
+            end_date = None
+            period_name = 'All Time'
+        else:
+            return Response({
+                'status': 'error',
+                'message': 'Invalid period_type. Use: current_year, last_year, current_month, last_month, all_time'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Filter expenses based on period
+        if period_type == 'all_time':
+            expenses = Expense.objects.all()
+        else:
+            expenses = Expense.objects.filter(date__range=[start_date, end_date])
+        
+        # Calculate statistics
+        total_count = expenses.count()
+        total_amount = expenses.aggregate(total=Sum('amount'))['total'] or 0
+        
+        # Category breakdown
+        category_breakdown = []
+        for choice in Expense.CATEGORY_CHOICES:
+            cat_expenses = expenses.filter(category=choice[0])
+            count = cat_expenses.count()
+            amount = cat_expenses.aggregate(total=Sum('amount'))['total'] or 0
+            
+            if count > 0:
+                category_breakdown.append({
+                    'category': choice[0],
+                    'category_display': choice[1],
+                    'count': count,
+                    'amount': float(amount),
+                    'percentage': round((float(amount) / float(total_amount) * 100) if total_amount > 0 else 0, 2)
+                })
+        
+        # Payment mode breakdown
+        payment_breakdown = []
+        for choice in Expense.PAYMENT_MODE_CHOICES:
+            mode_expenses = expenses.filter(mode_of_payment=choice[0])
+            count = mode_expenses.count()
+            amount = mode_expenses.aggregate(total=Sum('amount'))['total'] or 0
+            
+            if count > 0:
+                payment_breakdown.append({
+                    'mode': choice[0],
+                    'mode_display': choice[1],
+                    'count': count,
+                    'amount': float(amount),
+                    'percentage': round((float(amount) / float(total_amount) * 100) if total_amount > 0 else 0, 2)
+                })
+        
+        # Top expenses
+        top_expenses = expenses.order_by('-amount')[:5]
+        top_expenses_list = []
+        for expense in top_expenses:
+            top_expenses_list.append({
+                'id': expense.id,
+                'expense_name': expense.expense_name,
+                'amount': float(expense.amount),
+                'date': expense.date.isoformat(),
+                'category': expense.category,
+                'spent_by': expense.spent_by
+            })
+        
+        return Response({
+            'status': 'success',
+            'message': f'Summary for {period_name} retrieved successfully',
+            'data': {
+                'period_info': {
+                    'type': period_type,
+                    'name': period_name,
+                    'start_date': start_date.isoformat() if start_date else None,
+                    'end_date': end_date.isoformat() if end_date else None
+                },
+                'summary': {
+                    'total_count': total_count,
+                    'total_amount': float(total_amount)
+                },
+                'category_breakdown': category_breakdown,
+                'payment_breakdown': payment_breakdown,
+                'top_expenses': top_expenses_list,
+                'generated_at': timezone.now().isoformat()
+            }
+        }, status=status.HTTP_200_OK)
+        
+    except Exception as e:
+        logger.error(f"Error retrieving expense summary for {period_type}: {str(e)}")
+        return Response({
+            'status': 'error',
+            'message': f'Internal server error: {str(e)}'
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

@@ -3,8 +3,8 @@ from decimal import Decimal
 from django.conf import settings
 from django.db import transaction
 from rest_framework import serializers
-
-from .models import  AttendanceRecord, BulkWagePayment, Employee,  Merchant, FarmSegment, Crop, CropVariant, Wage, WeeklyWagePayment,  Yield, YieldVariant, YieldFarmSegment, Sale, SaleVariant, Job, JobEmployee,JobFarmSegment, Expense, get_wage_for_date
+from django.core.validators import MinValueValidator
+from .models import  AttendanceRecord, BillImage, BulkWagePayment, Employee,  Merchant, FarmSegment, Crop, CropVariant, PaymentHistory, SaleImage, Wage, WeeklyWagePayment,  Yield, YieldVariant, YieldFarmSegment, Sale, SaleVariant, Job, JobEmployee,JobFarmSegment, Expense, get_wage_for_date
 
 # Employee Serializer
 class EmployeeSerializer(serializers.ModelSerializer):
@@ -157,7 +157,25 @@ class CropVariantSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(f"Unit must be one of: {', '.join(valid_units)}")
         return value
 
-# Yield Variant Serializer    
+class BillImageSerializer(serializers.ModelSerializer):
+    """Serializer for bill images"""
+    url = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = BillImage
+        fields = ['id', 'url', 'original_filename', 'file_size', 'uploaded_at','yield_record_id']
+        read_only_fields = ['id', 'uploaded_at', 'file_size']
+    
+    def get_url(self, obj):
+        """Get the absolute URL for the image"""
+        if obj.image:
+            request = self.context.get('request')
+            if request:
+                return request.build_absolute_uri(obj.image.url)
+            return obj.image.url
+        return None
+
+
 class YieldVariantSerializer(serializers.ModelSerializer):
     crop_variant_name = serializers.CharField(source='crop_variant.crop_variant', read_only=True)
     crop_variant_id = serializers.IntegerField(source='crop_variant.id', read_only=True)
@@ -167,7 +185,7 @@ class YieldVariantSerializer(serializers.ModelSerializer):
         fields = ['id', 'crop_variant_id', 'crop_variant_name', 'quantity', 'unit', 'created_at']
         read_only_fields = ['id', 'created_at']
 
-# Yield Farm Segment Serializer
+
 class YieldFarmSegmentSerializer(serializers.ModelSerializer):
     farm_segment_name = serializers.CharField(source='farm_segment.farm_name', read_only=True)
     farm_segment_id = serializers.IntegerField(source='farm_segment.id', read_only=True)
@@ -177,32 +195,58 @@ class YieldFarmSegmentSerializer(serializers.ModelSerializer):
         fields = ['id', 'farm_segment_id', 'farm_segment_name', 'created_at']
         read_only_fields = ['id', 'created_at']
 
-# Yield Serializer
+
 class YieldSerializer(serializers.ModelSerializer):
+    """Main yield serializer with improved image handling"""
     crop_name = serializers.CharField(source='crop.crop_name', read_only=True)
     yield_variants = YieldVariantSerializer(many=True, read_only=True)
     yield_farm_segments = YieldFarmSegmentSerializer(many=True, read_only=True)
+    bill_images = BillImageSerializer(many=True, read_only=True)
     
-    # For write operations
+    # Backward compatibility
+    bill_urls = serializers.SerializerMethodField()
+    bill_count = serializers.SerializerMethodField()
+    
+    # Write-only fields for creation/update
     farm_segments = serializers.ListField(
         child=serializers.IntegerField(), 
         write_only=True,
-        required=True
+        required=True,
+        help_text="List of farm segment IDs"
     )
     variants = serializers.ListField(
         child=serializers.DictField(),
         write_only=True,
-        required=True
+        required=True,
+        help_text="List of variant objects with crop_variant_id, quantity, unit"
     )
     
     class Meta:
         model = Yield
         fields = [
-            'id', 'crop', 'crop_name', 'harvest_date', 'bill_url', 
-            'created_at', 'updated_at', 'yield_variants', 'yield_farm_segments',
+            'id', 'crop', 'crop_name', 'harvest_date', 
+            'bill_images', 'bill_urls', 'bill_count',
+            'created_at', 'updated_at', 
+            'yield_variants', 'yield_farm_segments',
             'farm_segments', 'variants'
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
+    
+    def get_bill_urls(self, obj):
+        """Get list of bill URLs for backward compatibility"""
+        request = self.context.get('request')
+        urls = []
+        for img in obj.bill_images.all():
+            if img.image:
+                if request:
+                    urls.append(request.build_absolute_uri(img.image.url))
+                else:
+                    urls.append(img.image.url)
+        return urls
+    
+    def get_bill_count(self, obj):
+        """Get the number of bill images"""
+        return obj.bill_images.count()
     
     def validate_farm_segments(self, value):
         """Validate that all farm segment IDs exist"""
@@ -210,33 +254,61 @@ class YieldSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("At least one farm segment must be selected.")
         
         existing_segments = FarmSegment.objects.filter(id__in=value)
-        if len(existing_segments) != len(value):
+        if len(existing_segments) != len(set(value)):
             raise serializers.ValidationError("One or more farm segments do not exist.")
         
-        return value
+        return list(set(value))  # Remove duplicates
     
     def validate_variants(self, value):
         """Validate variant data structure and existence"""
         if not value:
             raise serializers.ValidationError("At least one variant must be specified.")
         
-        for variant in value:
-            if not all(key in variant for key in ['variantId', 'unit', 'quantity']):
-                raise serializers.ValidationError("Each variant must have variantId, unit, and quantity.")
+        variant_ids = []
+        for i, variant in enumerate(value):
+            # Check required fields
+            if not all(key in variant for key in ['crop_variant_id', 'unit', 'quantity']):
+                raise serializers.ValidationError(
+                    f"Variant {i+1}: Must have crop_variant_id, unit, and quantity."
+                )
+            
+            # Validate types
+            try:
+                crop_variant_id = int(variant['crop_variant_id'])
+                quantity = float(variant['quantity'])
+            except (ValueError, TypeError):
+                raise serializers.ValidationError(
+                    f"Variant {i+1}: Invalid data types for crop_variant_id or quantity."
+                )
+            
+            # Check for duplicates
+            if crop_variant_id in variant_ids:
+                raise serializers.ValidationError(
+                    f"Variant {i+1}: Duplicate crop variant ID {crop_variant_id}."
+                )
+            variant_ids.append(crop_variant_id)
             
             # Validate variant exists
-            try:
-                CropVariant.objects.get(id=variant['variantId'])
-            except CropVariant.DoesNotExist:
-                raise serializers.ValidationError(f"Crop variant with ID {variant['variantId']} does not exist.")
+            if not CropVariant.objects.filter(id=crop_variant_id).exists():
+                raise serializers.ValidationError(
+                    f"Variant {i+1}: Crop variant with ID {crop_variant_id} does not exist."
+                )
             
             # Validate quantity is positive
-            if variant['quantity'] <= 0:
-                raise serializers.ValidationError("Quantity must be greater than 0.")
+            if quantity <= 0:
+                raise serializers.ValidationError(
+                    f"Variant {i+1}: Quantity must be greater than 0."
+                )
+            
+            # Normalize the data
+            variant['crop_variant_id'] = crop_variant_id
+            variant['quantity'] = quantity
+            variant['unit'] = str(variant['unit']).strip()
         
         return value
     
     def create(self, validated_data):
+        """Create yield with related objects"""
         farm_segments_data = validated_data.pop('farm_segments')
         variants_data = validated_data.pop('variants')
         
@@ -244,25 +316,28 @@ class YieldSerializer(serializers.ModelSerializer):
         yield_record = Yield.objects.create(**validated_data)
         
         # Create farm segment relationships
-        for segment_id in farm_segments_data:
-            YieldFarmSegment.objects.create(
-                yield_record=yield_record,
-                farm_segment_id=segment_id
-            )
+        farm_segments_to_create = [
+            YieldFarmSegment(yield_record=yield_record, farm_segment_id=segment_id)
+            for segment_id in farm_segments_data
+        ]
+        YieldFarmSegment.objects.bulk_create(farm_segments_to_create)
         
         # Create variant records
-        for variant_data in variants_data:
-            YieldVariant.objects.create(
+        variants_to_create = [
+            YieldVariant(
                 yield_record=yield_record,
-                crop_variant_id=variant_data['variantId'],
+                crop_variant_id=variant_data['crop_variant_id'],
                 quantity=variant_data['quantity'],
                 unit=variant_data['unit']
             )
+            for variant_data in variants_data
+        ]
+        YieldVariant.objects.bulk_create(variants_to_create)
         
         return yield_record
     
     def update(self, instance, validated_data):
-        # Extract nested data
+        """Update yield with related objects"""
         farm_segments_data = validated_data.pop('farm_segments', None)
         variants_data = validated_data.pop('variants', None)
         
@@ -276,28 +351,95 @@ class YieldSerializer(serializers.ModelSerializer):
             # Clear existing relationships
             instance.yield_farm_segments.all().delete()
             # Create new relationships
-            for segment_id in farm_segments_data:
-                YieldFarmSegment.objects.create(
-                    yield_record=instance,
-                    farm_segment_id=segment_id
-                )
+            farm_segments_to_create = [
+                YieldFarmSegment(yield_record=instance, farm_segment_id=segment_id)
+                for segment_id in farm_segments_data
+            ]
+            YieldFarmSegment.objects.bulk_create(farm_segments_to_create)
         
         # Update variants if provided
         if variants_data is not None:
             # Clear existing variants
             instance.yield_variants.all().delete()
             # Create new variants
-            for variant_data in variants_data:
-                YieldVariant.objects.create(
+            variants_to_create = [
+                YieldVariant(
                     yield_record=instance,
-                    crop_variant_id=variant_data['variantId'],
+                    crop_variant_id=variant_data['crop_variant_id'],
                     quantity=variant_data['quantity'],
                     unit=variant_data['unit']
                 )
+                for variant_data in variants_data
+            ]
+            YieldVariant.objects.bulk_create(variants_to_create)
         
         return instance
 
-# Sale Serializer
+
+class BillImageUploadSerializer(serializers.ModelSerializer):
+    """Serializer specifically for uploading bill images"""
+    
+    class Meta:
+        model = BillImage
+        fields = ['image', 'original_filename']
+        
+    def validate_image(self, value):
+        """Validate image file"""
+        # Check file size (max 10MB)
+        if value.size > 10 * 1024 * 1024:
+            raise serializers.ValidationError("Image file too large. Maximum size is 10MB.")
+        
+        # Check file type
+        allowed_types = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp']
+        if hasattr(value, 'content_type') and value.content_type not in allowed_types:
+            raise serializers.ValidationError(
+                "Invalid image format. Allowed formats: JPEG, PNG, WebP."
+            )
+        
+        return value
+
+
+class YieldSummarySerializer(serializers.Serializer):
+    """Serializer for yield summary data"""
+    total_yields = serializers.IntegerField()
+    total_bills = serializers.IntegerField()
+    monthly_summary = serializers.ListField(child=serializers.DictField())
+    crop_summary = serializers.ListField(child=serializers.DictField())
+    variant_summary = serializers.ListField(child=serializers.DictField())
+    
+# Sale Image Serializer - NEW
+class SaleImageSerializer(serializers.ModelSerializer):
+    image_url = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = SaleImage
+        fields = [
+            'id', 'image', 'image_url', 'image_name', 'description', 
+            'is_primary', 'uploaded_at'
+        ]
+        read_only_fields = ['id', 'uploaded_at']
+    
+    def get_image_url(self, obj):
+        if obj.image:
+            request = self.context.get('request')
+            if request:
+                return request.build_absolute_uri(obj.image.url)
+            return obj.image.url
+        return None
+
+
+# Payment History Serializer - NEW
+class PaymentHistorySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = PaymentHistory
+        fields = [
+            'id', 'payment_amount', 'payment_date', 'payment_method',
+            'payment_reference', 'notes', 'created_by'
+        ]
+        read_only_fields = ['id', 'payment_date']
+
+
+# Sale Variant Serializer - UNCHANGED
 class SaleVariantSerializer(serializers.ModelSerializer):
     crop_variant_name = serializers.CharField(source='crop_variant.crop_variant', read_only=True)
     crop_name = serializers.CharField(source='crop_variant.crop.crop_name', read_only=True)
@@ -310,13 +452,16 @@ class SaleVariantSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ['id', 'total_amount', 'created_at']
 
-# Sale Serializer
+
+# Sale Serializer - UPDATED
 class SaleSerializer(serializers.ModelSerializer):
     # Read-only fields for display
     merchant_name = serializers.CharField(source='merchant.name', read_only=True)
     merchant_contact = serializers.CharField(source='merchant.contact', read_only=True)
     crop_name = serializers.CharField(source='yield_record.crop.crop_name', read_only=True)
     sale_variants = SaleVariantSerializer(many=True, read_only=True)
+    sale_images = SaleImageSerializer(many=True, read_only=True)
+    payment_history = PaymentHistorySerializer(many=True, read_only=True)
     
     # Write-only fields for creation/update
     variants = serializers.ListField(
@@ -326,6 +471,22 @@ class SaleSerializer(serializers.ModelSerializer):
         help_text="List of variant data with variantId, quantity, amount, unit"
     )
     
+    # Image upload field
+    images = serializers.ListField(
+        child=serializers.ImageField(),
+        write_only=True,
+        required=False,
+        help_text="List of images to upload"
+    )
+    
+    # Image metadata
+    image_metadata = serializers.ListField(
+        child=serializers.DictField(),
+        write_only=True,
+        required=False,
+        help_text="List of image metadata with name, description, is_primary"
+    )
+    
     class Meta:
         model = Sale
         fields = [
@@ -333,11 +494,13 @@ class SaleSerializer(serializers.ModelSerializer):
             'yield_record', 'crop_name', 'payment_mode', 'harvest_date',
             'bill_url', 'total_amount', 'commission', 'lorry_rent',
             'cooly_charges', 'total_deductions', 'total_calculated_amount',
-            'final_amount', 'status', 'created_at', 'updated_at',
-            'sale_variants', 'variants'
+            'final_amount', 'paid_amount', 'pending_amount', 'payment_status',
+            'status', 'created_at', 'updated_at', 'sale_variants', 
+            'sale_images', 'payment_history', 'variants', 'images', 'image_metadata'
         ]
         read_only_fields = [
-            'id', 'total_deductions', 'final_amount', 'created_at', 'updated_at'
+            'id', 'total_deductions', 'final_amount', 'pending_amount', 
+            'payment_status', 'created_at', 'updated_at'
         ]
     
     def validate_merchant(self, value):
@@ -346,10 +509,25 @@ class SaleSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Merchant does not exist")
         return value
     
+    
+    
     def validate_yield_record(self, value):
-        """Validate yield record exists"""
+        """Validate yield record exists and is not already sold"""
         if not Yield.objects.filter(id=value.id).exists():
             raise serializers.ValidationError("Yield record does not exist")
+        
+        # Check if this yield is already sold (only for creation, not updates)
+        if not self.instance:  # Creation
+            existing_sale = Sale.objects.filter(yield_record=value).exclude(status='cancelled').first()
+            if existing_sale:
+                raise serializers.ValidationError("This yield record has already been sold")
+        
+        return value
+    
+    def validate_paid_amount(self, value):
+        """Validate paid amount is not negative"""
+        if value < 0:
+            raise serializers.ValidationError("Paid amount cannot be negative")
         return value
     
     def validate_variants(self, value):
@@ -359,7 +537,7 @@ class SaleSerializer(serializers.ModelSerializer):
         
         for variant in value:
             # Check required fields
-            required_fields = ['variantId', 'quantity', 'amount', 'unit']
+            required_fields = ['crop_variant_id', 'quantity', 'amount', 'unit']
             if not all(key in variant for key in required_fields):
                 raise serializers.ValidationError(
                     f"Each variant must have: {', '.join(required_fields)}"
@@ -367,10 +545,10 @@ class SaleSerializer(serializers.ModelSerializer):
             
             # Validate variant exists
             try:
-                crop_variant = CropVariant.objects.get(id=variant['variantId'])
+                crop_variant = CropVariant.objects.get(id=variant['crop_variant_id'])
             except CropVariant.DoesNotExist:
                 raise serializers.ValidationError(
-                    f"Crop variant with ID {variant['variantId']} does not exist."
+                    f"Crop variant with ID {variant['crop_variant_id']} does not exist."
                 )
             
             # Validate quantity and amount are positive
@@ -381,6 +559,20 @@ class SaleSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError("Amount per unit must be greater than 0.")
         
         return value
+    
+    def validate_image_metadata(self, value):
+        """Validate image metadata if provided"""
+        if value:
+            for metadata in value:
+                if 'name' not in metadata:
+                    metadata['name'] = ''
+                if 'description' not in metadata:
+                    metadata['description'] = ''
+                if 'is_primary' not in metadata:
+                    metadata['is_primary'] = False
+        return value
+    
+    
     
     def validate(self, data):
         """Cross-field validation"""
@@ -403,11 +595,31 @@ class SaleSerializer(serializers.ModelSerializer):
                     f"does not match sum of variants ({calculated_total})"
                 )
         
+        # Validate paid amount doesn't exceed final amount
+        if 'paid_amount' in data and 'total_calculated_amount' in data:
+            commission = data.get('commission', 0)
+            lorry_rent = data.get('lorry_rent', 0)
+            cooly_charges = data.get('cooly_charges', 0)
+            total_deductions = commission + lorry_rent + cooly_charges
+            final_amount = data['total_calculated_amount'] - total_deductions
+            
+            if data['paid_amount'] > final_amount:
+                raise serializers.ValidationError("Paid amount cannot exceed final amount")
+        
+        # Validate images and metadata count match
+        images = data.get('images', [])
+        image_metadata = data.get('image_metadata', [])
+        
+        if images and image_metadata and len(images) != len(image_metadata):
+            raise serializers.ValidationError("Number of images and metadata must match")
+        
         return data
     
     @transaction.atomic
     def create(self, validated_data):
         variants_data = validated_data.pop('variants')
+        images_data = validated_data.pop('images', [])
+        image_metadata = validated_data.pop('image_metadata', [])
         
         # Create the sale record
         sale = Sale.objects.create(**validated_data)
@@ -416,17 +628,39 @@ class SaleSerializer(serializers.ModelSerializer):
         for variant_data in variants_data:
             SaleVariant.objects.create(
                 sale=sale,
-                crop_variant_id=variant_data['variantId'],
+                crop_variant_id=variant_data['crop_variant_id'],
                 quantity=Decimal(str(variant_data['quantity'])),
                 amount_per_unit=Decimal(str(variant_data['amount'])),
                 unit=variant_data['unit']
             )
+        
+        # Create image records - FIXED: Handle multiple images properly
+        print(f"Creating {len(images_data)} images for sale {sale.id}")
+        for i, image in enumerate(images_data):
+            metadata = image_metadata[i] if i < len(image_metadata) else {}
+            
+            # Set first image as primary if no is_primary is specified
+            is_primary = metadata.get('is_primary', i == 0)
+            
+            sale_image = SaleImage.objects.create(
+                sale=sale,
+                image=image,
+                image_name=metadata.get('name', f'Image {i+1}'),
+                description=metadata.get('description', ''),
+                is_primary=is_primary
+            )
+            print(f"Created SaleImage {sale_image.id}: {sale_image.image_name}")
         
         return sale
     
     @transaction.atomic
     def update(self, instance, validated_data):
         variants_data = validated_data.pop('variants', None)
+        images_data = validated_data.pop('images', [])
+        image_metadata = validated_data.pop('image_metadata', [])
+        
+        # Track old paid amount for payment history
+        old_paid_amount = instance.paid_amount
         
         # Update main sale fields
         for attr, value in validated_data.items():
@@ -442,31 +676,102 @@ class SaleSerializer(serializers.ModelSerializer):
             for variant_data in variants_data:
                 SaleVariant.objects.create(
                     sale=instance,
-                    crop_variant_id=variant_data['variantId'],
+                    crop_variant_id=variant_data['crop_variant_id'],
                     quantity=Decimal(str(variant_data['quantity'])),
                     amount_per_unit=Decimal(str(variant_data['amount'])),
                     unit=variant_data['unit']
                 )
         
+        # Add new images if provided - FIXED: Handle multiple images properly
+        if images_data:
+            print(f"Adding {len(images_data)} new images to sale {instance.id}")
+            
+            # Check if we should make any of the new images primary
+            has_existing_primary = instance.sale_images.filter(is_primary=True).exists()
+            
+            for i, image in enumerate(images_data):
+                metadata = image_metadata[i] if i < len(image_metadata) else {}
+                
+                # If no existing primary image, make first new image primary
+                is_primary = metadata.get('is_primary', not has_existing_primary and i == 0)
+                
+                sale_image = SaleImage.objects.create(
+                    sale=instance,
+                    image=image,
+                    image_name=metadata.get('name', f'Updated Image {i+1}'),
+                    description=metadata.get('description', ''),
+                    is_primary=is_primary
+                )
+                print(f"Added new SaleImage {sale_image.id}: {sale_image.image_name}")
+        
+        # Create payment history record if paid amount changed
+        new_paid_amount = instance.paid_amount
+        if new_paid_amount != old_paid_amount and new_paid_amount > old_paid_amount:
+            payment_amount = new_paid_amount - old_paid_amount
+            PaymentHistory.objects.create(
+                sale=instance,
+                payment_amount=payment_amount,
+                payment_method=instance.payment_mode,
+                notes=f"Payment updated via sale update"
+            )
+        
         return instance
 
-# Sale summary serializer
+
+# Sale summary serializer - UPDATED
 class SaleSummarySerializer(serializers.ModelSerializer):
     """Lightweight serializer for sale summaries/lists"""
     merchant_name = serializers.CharField(source='merchant.name', read_only=True)
     crop_name = serializers.CharField(source='yield_record.crop.crop_name', read_only=True)
     variant_count = serializers.SerializerMethodField()
+    image_count = serializers.SerializerMethodField()
+    primary_image = serializers.SerializerMethodField()
     
     class Meta:
         model = Sale
         fields = [
             'id', 'merchant_name', 'crop_name', 'payment_mode',
-            'harvest_date', 'final_amount', 'status', 'variant_count',
-            'created_at'
+            'harvest_date', 'final_amount', 'paid_amount', 'pending_amount',
+            'payment_status', 'status', 'variant_count', 'image_count', 
+            'primary_image', 'created_at'
         ]
     
     def get_variant_count(self, obj):
         return obj.sale_variants.count()
+    
+    def get_image_count(self, obj):
+        return obj.sale_images.count()
+    
+    def get_primary_image(self, obj):
+        primary_image = obj.sale_images.filter(is_primary=True).first()
+        if primary_image:
+            request = self.context.get('request')
+            if request:
+                return request.build_absolute_uri(primary_image.image.url)
+            return primary_image.image.url
+        return None
+
+
+# Payment Update Serializer - NEW
+class PaymentUpdateSerializer(serializers.Serializer):
+    payment_amount = serializers.DecimalField(
+        max_digits=12, 
+        decimal_places=2, 
+        validators=[MinValueValidator(Decimal('0.01'))]
+    )
+    payment_method = serializers.ChoiceField(choices=Sale.PAYMENT_MODE_CHOICES)
+    payment_reference = serializers.CharField(max_length=100, required=False, allow_blank=True)
+    notes = serializers.CharField(required=False, allow_blank=True)
+    created_by = serializers.CharField(max_length=100, required=False, allow_blank=True)
+    
+    def validate_payment_amount(self, value):
+        """Validate payment amount doesn't exceed pending amount"""
+        if hasattr(self, 'instance') and self.instance:
+            if value > self.instance.pending_amount:
+                raise serializers.ValidationError(
+                    f"Payment amount (₹{value}) cannot exceed pending amount (₹{self.instance.pending_amount})"
+                )
+        return value
 
 # Job Farm Segment serializers
 class JobFarmSegmentSerializer(serializers.ModelSerializer):

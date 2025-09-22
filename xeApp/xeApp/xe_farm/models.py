@@ -1,10 +1,14 @@
+import os
 import sys
+import uuid
 from django.db import models
 from django.core.validators import MinValueValidator
 from decimal import Decimal
 from django.forms import ValidationError
 from django.utils import timezone
 from datetime import datetime, timedelta
+from django.core.validators import URLValidator
+
 
 
 class Employee(models.Model):
@@ -108,26 +112,97 @@ class CropVariant(models.Model):
     def __str__(self):
         return f"{self.crop.crop_name} - {self.crop_variant}"
 
+
+def bill_image_upload_path(instance, filename):
+    """Generate upload path for bill images"""
+    # Get file extension
+    ext = filename.split('.')[-1] if '.' in filename else 'jpg'
+    # Generate unique filename
+    filename = f"yield_bill_{uuid.uuid4().hex[:16]}.{ext}"
+    # Return path: uploads/bills/YYYY/MM/filename
+    return os.path.join('uploads', 'bills', str(instance.yield_record.harvest_date.year), 
+                       str(instance.yield_record.harvest_date.month).zfill(2), filename)
+
+
 class Yield(models.Model):
-    crop = models.ForeignKey(Crop, on_delete=models.CASCADE, related_name='yields')
+    crop = models.ForeignKey('Crop', on_delete=models.CASCADE, related_name='yields')
     harvest_date = models.DateTimeField()
-    bill_url = models.URLField(max_length=500, blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
-    
+
     class Meta:
         db_table = 'xe_yields'
         ordering = ['-created_at']
         verbose_name = 'Yield'
         verbose_name_plural = 'Yields'
-    
+
     def __str__(self):
         return f"{self.crop.crop_name} - {self.harvest_date.strftime('%Y-%m-%d')}"
+    
+    @property
+    def bill_count(self):
+        """Get the number of bill images"""
+        return self.bill_images.count()
+    
+    @property
+    def has_bills(self):
+        """Check if yield has any bill images"""
+        return self.bill_images.exists()
+    
+    @property
+    def bill_urls(self):
+        """Get list of bill image URLs for backward compatibility"""
+        return [img.get_absolute_url() for img in self.bill_images.all()]
+
+
+class BillImage(models.Model):
+    """Separate model for bill images"""
+    yield_record = models.ForeignKey(Yield, on_delete=models.CASCADE, related_name='bill_images')
+    image = models.ImageField(upload_to=bill_image_upload_path, max_length=500)
+    original_filename = models.CharField(max_length=255, blank=True)
+    file_size = models.PositiveIntegerField(null=True, blank=True)  # in bytes
+    uploaded_at = models.DateTimeField(auto_now_add=True)
+    
+    class Meta:
+        db_table = 'xe_bill_images'
+        ordering = ['uploaded_at']
+    
+    def __str__(self):
+        return f"Bill for {self.yield_record} - {self.original_filename}"
+    
+    def save(self, *args, **kwargs):
+        if self.image and not self.original_filename:
+            self.original_filename = self.image.name
+        if self.image and not self.file_size:
+            self.file_size = self.image.size
+        super().save(*args, **kwargs)
+    
+    def delete(self, *args, **kwargs):
+        """Override delete to remove file from storage"""
+        if self.image:
+            # Delete the actual file
+            if os.path.isfile(self.image.path):
+                os.remove(self.image.path)
+        super().delete(*args, **kwargs)
+    
+    def get_absolute_url(self):
+        """Get the absolute URL for the image"""
+        if self.image:
+            return self.image.url
+        return None
+    
+    @property
+    def filename(self):
+        """Get just the filename"""
+        if self.image:
+            return os.path.basename(self.image.name)
+        return None
+
 
 class YieldFarmSegment(models.Model):
     """Junction table for yield and farm segments (many-to-many relationship)"""
     yield_record = models.ForeignKey(Yield, on_delete=models.CASCADE, related_name='yield_farm_segments')
-    farm_segment = models.ForeignKey(FarmSegment, on_delete=models.CASCADE, related_name='yield_farm_segments')
+    farm_segment = models.ForeignKey('FarmSegment', on_delete=models.CASCADE, related_name='yield_farm_segments')
     created_at = models.DateTimeField(auto_now_add=True)
     
     class Meta:
@@ -137,10 +212,11 @@ class YieldFarmSegment(models.Model):
     def __str__(self):
         return f"{self.yield_record} - {self.farm_segment.farm_name}"
 
+
 class YieldVariant(models.Model):
     """Individual variant quantities for each yield record"""
     yield_record = models.ForeignKey(Yield, on_delete=models.CASCADE, related_name='yield_variants')
-    crop_variant = models.ForeignKey(CropVariant, on_delete=models.CASCADE, related_name='yield_variants')
+    crop_variant = models.ForeignKey('CropVariant', on_delete=models.CASCADE, related_name='yield_variants')
     quantity = models.DecimalField(max_digits=10, decimal_places=2)
     unit = models.CharField(max_length=20)  # Store the unit used at time of yield
     created_at = models.DateTimeField(auto_now_add=True)
@@ -166,6 +242,13 @@ class Sale(models.Model):
         ('cancelled', 'Cancelled'),
     ]
     
+    # Payment status choices - NEW
+    PAYMENT_STATUS_CHOICES = [
+        ('pending', 'Pending'),
+        ('paid', 'Paid'),
+        ('partial', 'Partial'),
+    ]
+    
     merchant = models.ForeignKey(Merchant, on_delete=models.CASCADE, related_name='sales')
     yield_record = models.ForeignKey(Yield, on_delete=models.CASCADE, related_name='sales')
     payment_mode = models.CharField(max_length=20, choices=PAYMENT_MODE_CHOICES)
@@ -180,6 +263,11 @@ class Sale(models.Model):
     total_deductions = models.DecimalField(max_digits=12, decimal_places=2, default=0, validators=[MinValueValidator(Decimal('0'))])
     total_calculated_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0, validators=[MinValueValidator(Decimal('0'))])
     final_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0, validators=[MinValueValidator(Decimal('0'))])
+    
+    # Payment tracking fields - NEW
+    paid_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0, validators=[MinValueValidator(Decimal('0'))])
+    pending_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0, validators=[MinValueValidator(Decimal('0'))])
+    payment_status = models.CharField(max_length=20, choices=PAYMENT_STATUS_CHOICES, default='pending')
     
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
     created_at = models.DateTimeField(auto_now_add=True)
@@ -198,7 +286,21 @@ class Sale(models.Model):
         # Auto-calculate total deductions and final amount
         self.total_deductions = self.commission + self.lorry_rent + self.cooly_charges
         self.final_amount = self.total_calculated_amount - self.total_deductions
+        
+        # Auto-calculate payment status and pending amount
+        if self.paid_amount >= self.final_amount:
+            self.payment_status = 'paid'
+            self.pending_amount = Decimal('0.00')
+            self.paid_amount = self.final_amount  # Ensure no overpayment
+        elif self.paid_amount > 0:
+            self.payment_status = 'partial'
+            self.pending_amount = self.final_amount - self.paid_amount
+        else:
+            self.payment_status = 'pending'
+            self.pending_amount = self.final_amount
+        
         super().save(*args, **kwargs)
+
 
 class SaleVariant(models.Model):
     """Individual variant sales data for each sale"""
@@ -221,6 +323,47 @@ class SaleVariant(models.Model):
         # Auto-calculate total amount
         self.total_amount = self.quantity * self.amount_per_unit
         super().save(*args, **kwargs)
+
+
+class SaleImage(models.Model):
+    """Model to store multiple images for each sale - NEW"""
+    sale = models.ForeignKey(Sale, on_delete=models.CASCADE, related_name='sale_images')
+    image = models.ImageField(upload_to='sale_images/')
+    image_name = models.CharField(max_length=255, blank=True, null=True)
+    description = models.TextField(blank=True, null=True)
+    is_primary = models.BooleanField(default=False)
+    uploaded_at = models.DateTimeField(auto_now_add=True)
+    
+    class Meta:
+        db_table = 'xe_sale_images'
+        ordering = ['-is_primary', '-uploaded_at']
+    
+    def __str__(self):
+        return f"Sale {self.sale.id} - Image {self.id}"
+    
+    def save(self, *args, **kwargs):
+        # If this is marked as primary, unmark all other images for this sale
+        if self.is_primary:
+            SaleImage.objects.filter(sale=self.sale, is_primary=True).exclude(id=self.id).update(is_primary=False)
+        super().save(*args, **kwargs)
+
+
+class PaymentHistory(models.Model):
+    """Track payment history for each sale - NEW"""
+    sale = models.ForeignKey(Sale, on_delete=models.CASCADE, related_name='payment_history')
+    payment_amount = models.DecimalField(max_digits=12, decimal_places=2, validators=[MinValueValidator(Decimal('0.01'))])
+    payment_date = models.DateTimeField(auto_now_add=True)
+    payment_method = models.CharField(max_length=20, choices=Sale.PAYMENT_MODE_CHOICES)
+    payment_reference = models.CharField(max_length=100, blank=True, null=True)
+    notes = models.TextField(blank=True, null=True)
+    created_by = models.CharField(max_length=100, blank=True, null=True)  # Store user info if needed
+    
+    class Meta:
+        db_table = 'xe_payment_history'
+        ordering = ['-payment_date']
+    
+    def __str__(self):
+        return f"Payment {self.id} - Sale {self.sale.id} - ₹{self.payment_amount}"
 
 class Job(models.Model):
     JOB_STATUS_CHOICES = [
