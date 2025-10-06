@@ -9,8 +9,6 @@ from django.utils import timezone
 from datetime import datetime, timedelta
 from django.core.validators import URLValidator
 
-
-
 class Employee(models.Model):
     GENDER_CHOICES = [
         ('Male', 'Male'),
@@ -446,7 +444,7 @@ class Expense(models.Model):
     category = models.CharField(max_length=100, choices=CATEGORY_CHOICES)
     description = models.TextField(blank=True, null=True)
     amount = models.DecimalField(max_digits=12, decimal_places=2, validators=[MinValueValidator(Decimal('0.01'))])
-    spent_by = models.CharField(max_length=255)
+    spent_by = models.CharField(max_length=255, blank=True, null=True)
     mode_of_payment = models.CharField(max_length=100, choices=PAYMENT_MODE_CHOICES)
     expense_image_url = models.URLField(max_length=500, blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)

@@ -1,4 +1,5 @@
 
+import profile
 from django.urls import path
 from django.conf import settings
 from django.conf.urls.static import static
@@ -19,9 +20,8 @@ from xe_farm.views.expense.expense_view import (get_expense_comparison_stats, ge
 from xe_farm.views.wages.wages_view import ( save_wage_data, get_wage_list, get_wage_detail, edit_wage_data, delete_wage, get_employee_wages, end_current_wage, get_wage_statistics)
 
 urlpatterns = [
-    path('api/employees/', save_employee_data, name='save_employee_data'),
-
     # Employee GET endpoints
+    path('api/employees/', save_employee_data, name='save_employee_data'),
     path('api/employees', get_employee_list, name='get_employee_list'),
     path('api/employees/<int:employee_id>/', get_employee_detail, name='get_employee_detail'),
     path('api/employees/<int:employee_id>/edit', edit_employee_data, name='edit_employee'),

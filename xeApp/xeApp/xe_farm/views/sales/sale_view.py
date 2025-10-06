@@ -1,7 +1,9 @@
+from calendar import monthrange
 from datetime import datetime, timedelta, timezone
 import io
 import json
 from turtle import pd
+from venv import logger
 from django.db.models import Q, Sum, Count, Avg
 from django.http import HttpResponse
 from rest_framework.decorators import api_view, parser_classes
@@ -2003,24 +2005,19 @@ def get_dashboard_revenue(request):
         )
         
         # Payment status breakdown for current year
-        current_year_payment_breakdown = current_year_sales.values('payment_status').annotate(
+        current_year_payment_breakdown = current_year_sales.values('payment_mode').annotate(
             count=Count('id'),
-            amount=Sum('final_amount')
-        ).order_by('-amount')
+            total_amount=Sum('final_amount')
+        ).order_by('-total_amount')
         
-        payment_breakdown = {
-            'paid': {'count': 0, 'amount': 0},
-            'partial': {'count': 0, 'amount': 0},
-            'pending': {'count': 0, 'amount': 0}
-        }
-        
+        # Convert to list for JSON serialization
+        payment_breakdown = []
         for item in current_year_payment_breakdown:
-            status = item['payment_status']
-            if status in payment_breakdown:
-                payment_breakdown[status] = {
-                    'count': item['count'],
-                    'amount': float(item['amount'] or 0)
-                }
+            payment_breakdown.append({
+                'payment_mode': item['payment_mode'],
+                'count': item['count'],
+                'total_amount': float(item['total_amount'] or 0)
+            })
         
         # Recent activity (last 7 days)
         recent_sales = base_sales.filter(
@@ -2081,11 +2078,10 @@ def get_dashboard_revenue(request):
         
     except Exception as e:
         print(f"Dashboard revenue error: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.error(f"Dashboard revenue error: {str(e)}")
         return Response({
             'status': 'error',
-            'message': f'An error occurred: {str(e)}'
+            'message': f'Internal server error: {str(e)}'
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
@@ -2157,18 +2153,18 @@ def get_quick_stats(request):
         )
         
         # Handle None values and format
-        def format_stats(stats, period_name):
-            for key, value in stats.items():
+        def format_stats(stats_dict, period_name):
+            for key, value in stats_dict.items():
                 if value is None:
-                    stats[key] = 0
+                    stats_dict[key] = 0
             
             return {
                 'period_name': period_name,
-                'total_revenue': f"₹{stats['total_revenue']:,.2f}",
-                'total_revenue_raw': float(stats['total_revenue']),
-                'total_sales': stats['total_sales'],
-                'total_pending': f"₹{stats['total_pending']:,.2f}",
-                'total_pending_raw': float(stats['total_pending'])
+                'total_revenue': f"₹{stats_dict['total_revenue']:,.2f}",
+                'total_revenue_raw': float(stats_dict['total_revenue']),
+                'total_sales': stats_dict['total_sales'],
+                'total_pending': f"₹{stats_dict['total_pending']:,.2f}",
+                'total_pending_raw': float(stats_dict['total_pending'])
             }
         
         # Calculate month-over-month change
@@ -2201,11 +2197,10 @@ def get_quick_stats(request):
         
     except Exception as e:
         print(f"Quick stats error: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.error(f"Quick stats error: {str(e)}")
         return Response({
             'status': 'error',
-            'message': f'An error occurred: {str(e)}'
+            'message': f'Internal server error: {str(e)}'
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
@@ -2228,6 +2223,10 @@ def get_revenue_by_period(request, period_type):
         current_month = today.month
         
         # Determine date range based on period_type
+        start_date = None
+        end_date = None
+        period_name = ''
+        
         if period_type == 'current_year':
             start_date = today.replace(month=1, day=1)
             end_date = today.replace(month=12, day=31)
@@ -2272,7 +2271,7 @@ def get_revenue_by_period(request, period_type):
             sales = sales.filter(merchant_id=merchant_id)
         
         # Filter by date range
-        if period_type != 'all_time':
+        if period_type != 'all_time' and start_date and end_date:
             sales = sales.filter(harvest_date__date__range=[start_date, end_date])
         
         # Calculate metrics
@@ -2310,9 +2309,9 @@ def get_revenue_by_period(request, period_type):
         }
         
         for item in payment_breakdown:
-            status = item['payment_status']
-            if status in breakdown_dict:
-                breakdown_dict[status] = {
+            payment_status = item['payment_status']
+            if payment_status in breakdown_dict:
+                breakdown_dict[payment_status] = {
                     'count': item['count'],
                     'amount': float(item['amount'] or 0)
                 }
@@ -2359,9 +2358,257 @@ def get_revenue_by_period(request, period_type):
         
     except Exception as e:
         print(f"Revenue by period error: {e}")
+        logger.error(f"Revenue by period error: {str(e)}")
+        return Response({
+            'status': 'error',
+            'message': f'Internal server error: {str(e)}'
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+# FIXED: Complete expense dashboard function with proper status import
+@api_view(['GET'])
+def get_expense_dashboard_stats(request):
+    """
+    Get comprehensive expense statistics for dashboard
+    Including: current year, last year, current month, last month, whole year data
+    """
+    try:
+        # Get current date info
+        today = timezone.now().date()
+        current_year = today.year
+        current_month = today.month
+        
+        # Date ranges
+        current_year_start = today.replace(month=1, day=1)
+        current_year_end = today.replace(month=12, day=31)
+        
+        last_year = current_year - 1
+        last_year_start = today.replace(year=last_year, month=1, day=1)
+        last_year_end = today.replace(year=last_year, month=12, day=31)
+        
+        current_month_start = today.replace(day=1)
+        # Get last day of current month
+        last_day_current_month = monthrange(current_year, current_month)[1]
+        current_month_end = today.replace(day=last_day_current_month)
+        
+        # Last month calculation
+        if current_month == 1:
+            last_month_year = current_year - 1
+            last_month_num = 12
+        else:
+            last_month_year = current_year
+            last_month_num = current_month - 1
+        
+        last_month_start = today.replace(year=last_month_year, month=last_month_num, day=1)
+        last_day_last_month = monthrange(last_month_year, last_month_num)[1]
+        last_month_end = today.replace(year=last_month_year, month=last_month_num, day=last_day_last_month)
+        
+        # Last 30 days
+        last_30_days = today - timedelta(days=30)
+        
+        # Import your Expense model here
+        from ...models import Expense
+        
+        # Time period statistics
+        time_periods = {}
+        
+        # Current Year
+        current_year_expenses = Expense.objects.filter(date__range=[current_year_start, current_year_end])
+        time_periods['current_year'] = {
+            'count': current_year_expenses.count(),
+            'total_amount': float(current_year_expenses.aggregate(total=Sum('amount'))['total'] or 0),
+            'period_name': f'Current Year ({current_year})',
+            'start_date': current_year_start.isoformat(),
+            'end_date': current_year_end.isoformat()
+        }
+        
+        # Last Year
+        last_year_expenses = Expense.objects.filter(date__range=[last_year_start, last_year_end])
+        time_periods['last_year'] = {
+            'count': last_year_expenses.count(),
+            'total_amount': float(last_year_expenses.aggregate(total=Sum('amount'))['total'] or 0),
+            'period_name': f'Last Year ({last_year})',
+            'start_date': last_year_start.isoformat(),
+            'end_date': last_year_end.isoformat()
+        }
+        
+        # Current Month
+        current_month_expenses = Expense.objects.filter(date__range=[current_month_start, current_month_end])
+        time_periods['current_month'] = {
+            'count': current_month_expenses.count(),
+            'total_amount': float(current_month_expenses.aggregate(total=Sum('amount'))['total'] or 0),
+            'period_name': f'Current Month ({today.strftime("%B %Y")})',
+            'start_date': current_month_start.isoformat(),
+            'end_date': current_month_end.isoformat()
+        }
+        
+        # Last Month
+        last_month_expenses = Expense.objects.filter(date__range=[last_month_start, last_month_end])
+        month_name = last_month_start.strftime("%B %Y")
+        time_periods['last_month'] = {
+            'count': last_month_expenses.count(),
+            'total_amount': float(last_month_expenses.aggregate(total=Sum('amount'))['total'] or 0),
+            'period_name': f'Last Month ({month_name})',
+            'start_date': last_month_start.isoformat(),
+            'end_date': last_month_end.isoformat()
+        }
+        
+        # Last 30 Days
+        last_30_days_expenses = Expense.objects.filter(date__gte=last_30_days)
+        time_periods['last_30_days'] = {
+            'count': last_30_days_expenses.count(),
+            'total_amount': float(last_30_days_expenses.aggregate(total=Sum('amount'))['total'] or 0),
+            'period_name': 'Last 30 Days',
+            'start_date': last_30_days.isoformat(),
+            'end_date': today.isoformat()
+        }
+        
+        # All Time (Whole Year Data)
+        all_expenses = Expense.objects.all()
+        time_periods['all_time'] = {
+            'count': all_expenses.count(),
+            'total_amount': float(all_expenses.aggregate(total=Sum('amount'))['total'] or 0),
+            'period_name': 'All Time',
+            'start_date': None,
+            'end_date': None
+        }
+        
+        # Category-wise statistics for current year
+        category_stats = []
+        if hasattr(Expense, 'CATEGORY_CHOICES'):
+            for choice in Expense.CATEGORY_CHOICES:
+                category_expenses = current_year_expenses.filter(category=choice[0])
+                count = category_expenses.count()
+                amount = category_expenses.aggregate(total=Sum('amount'))['total'] or 0
+                
+                category_stats.append({
+                    'expense_category': choice[0],
+                    'category_display': choice[1],
+                    'count': count,
+                    'total_amount': float(amount),
+                    'percentage': round((float(amount) / time_periods['current_year']['total_amount'] * 100) if time_periods['current_year']['total_amount'] > 0 else 0, 2)
+                })
+        
+        # Payment mode statistics for current year
+        payment_mode_stats = []
+        if hasattr(Expense, 'PAYMENT_MODE_CHOICES'):
+            for choice in Expense.PAYMENT_MODE_CHOICES:
+                mode_expenses = current_year_expenses.filter(mode_of_payment=choice[0])
+                count = mode_expenses.count()
+                amount = mode_expenses.aggregate(total=Sum('amount'))['total'] or 0
+                
+                payment_mode_stats.append({
+                    'mode_of_payment': choice[0],
+                    'mode_display': choice[1],
+                    'count': count,
+                    'total_amount': float(amount),
+                    'percentage': round((float(amount) / time_periods['current_year']['total_amount'] * 100) if time_periods['current_year']['total_amount'] > 0 else 0, 2)
+                })
+        
+        # Top spenders for current year
+        top_spenders = current_year_expenses.values('spent_by').annotate(
+            total_count=Count('id'),
+            total_amount=Sum('amount')
+        ).order_by('-total_amount')[:10]
+        
+        top_spenders_list = []
+        for spender in top_spenders:
+            top_spenders_list.append({
+                'spent_by': spender['spent_by'],
+                'count': spender['total_count'],
+                'total_amount': float(spender['total_amount']),
+                'percentage': round((float(spender['total_amount']) / time_periods['current_year']['total_amount'] * 100) if time_periods['current_year']['total_amount'] > 0 else 0, 2)
+            })
+        
+        # Monthly trend for current year
+        monthly_trend = current_year_expenses.extra(
+            select={'month': 'EXTRACT(month FROM date)'}
+        ).values('month').annotate(
+            count=Count('id'),
+            total_amount=Sum('amount')
+        ).order_by('month')
+        
+        monthly_trend_list = []
+        for month_data in monthly_trend:
+            month_num = int(month_data['month'])
+            month_name = datetime(current_year, month_num, 1).strftime('%B')
+            monthly_trend_list.append({
+                'month': month_num,
+                'month_name': month_name,
+                'count': month_data['count'],
+                'total_amount': float(month_data['total_amount'] or 0)
+            })
+        
+        # Recent expenses (last 7 days)
+        recent_expenses = Expense.objects.filter(
+            date__gte=today - timedelta(days=7)
+        ).order_by('-date')[:10]
+        
+        recent_expenses_list = []
+        for expense in recent_expenses:
+            recent_expenses_list.append({
+                'id': expense.id,
+                'amount': float(expense.amount),
+                'category': getattr(expense, 'category', 'N/A'),
+                'spent_by': expense.spent_by,
+                'date': expense.date.isoformat(),
+                'description': getattr(expense, 'description', '') or ''
+            })
+        
+        # Calculate percentage changes
+        def calculate_percentage_change(current, previous):
+            if previous == 0:
+                return 100 if current > 0 else 0
+            return round(((current - previous) / previous) * 100, 2)
+        
+        # Year-over-year comparison
+        yearly_change = calculate_percentage_change(
+            time_periods['current_year']['total_amount'],
+            time_periods['last_year']['total_amount']
+        )
+        
+        # Month-over-month comparison
+        monthly_change = calculate_percentage_change(
+            time_periods['current_month']['total_amount'],
+            time_periods['last_month']['total_amount']
+        )
+        
+        # Build response data
+        response_data = {
+            'time_periods': time_periods,
+            'comparisons': {
+                'yearly_comparison': {
+                    'percentage_change': yearly_change,
+                    'trend': 'up' if yearly_change > 0 else 'down' if yearly_change < 0 else 'stable',
+                    'current_year_amount': time_periods['current_year']['total_amount'],
+                    'last_year_amount': time_periods['last_year']['total_amount']
+                },
+                'monthly_comparison': {
+                    'percentage_change': monthly_change,
+                    'trend': 'up' if monthly_change > 0 else 'down' if monthly_change < 0 else 'stable',
+                    'current_month_amount': time_periods['current_month']['total_amount'],
+                    'last_month_amount': time_periods['last_month']['total_amount']
+                }
+            },
+            'category_breakdown': category_stats,
+            'payment_mode_breakdown': payment_mode_stats,
+            'top_spenders': top_spenders_list,
+            'monthly_trend': monthly_trend_list,
+            'recent_expenses': recent_expenses_list,
+            'generated_at': timezone.now().isoformat()
+        }
+        
+        return Response({
+            'status': 'success',
+            'message': 'Expense dashboard statistics retrieved successfully',
+            'data': response_data
+        }, status=status.HTTP_200_OK)
+        
+    except Exception as e:
+        print(f"Expense dashboard error: {e}")
         import traceback
         traceback.print_exc()
         return Response({
             'status': 'error',
-            'message': f'An error occurred: {str(e)}'
+            'message': f'Internal server error: {str(e)}'
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

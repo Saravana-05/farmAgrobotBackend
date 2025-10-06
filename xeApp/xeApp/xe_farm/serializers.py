@@ -6,6 +6,8 @@ from rest_framework import serializers
 from django.core.validators import MinValueValidator
 from .models import  AttendanceRecord, BillImage, BulkWagePayment, Employee,  Merchant, FarmSegment, Crop, CropVariant, PaymentHistory, SaleImage, Wage, WeeklyWagePayment,  Yield, YieldVariant, YieldFarmSegment, Sale, SaleVariant, Job, JobEmployee,JobFarmSegment, Expense, get_wage_for_date
 
+
+
 # Employee Serializer
 class EmployeeSerializer(serializers.ModelSerializer):
     class Meta:
@@ -1002,17 +1004,19 @@ class ExpenseSerializer(serializers.ModelSerializer):
         return value
     
     def validate_expense_name(self, value):
-        if not value.strip():
+        if not value or not value.strip():
             raise serializers.ValidationError("Expense name cannot be empty")
         if len(value.strip()) < 2:
             raise serializers.ValidationError("Expense name must be at least 2 characters")
         return value.strip()
     
     def validate_spent_by(self, value):
-        if not value.strip():
-            raise serializers.ValidationError("Spent by field cannot be empty")
-        return value.strip()
-
+        # Make spent_by optional - only validate if provided
+        if value is not None and value.strip():
+            return value.strip()
+        # Return empty string or None if not provided (depending on your model field requirements)
+        return value  # or return "" if your model requires a string
+    
 # Wages Serializer
 class WageSerializer(serializers.ModelSerializer):
     employee_name = serializers.CharField(source='employee.name', read_only=True)

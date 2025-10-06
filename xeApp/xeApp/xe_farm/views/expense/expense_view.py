@@ -15,7 +15,7 @@ from django.utils import timezone
 from datetime import datetime, timedelta
 from ...models import Expense
 from ...serializers import ExpenseSerializer
-from ...utils import get_default_expense_image_local  # Assuming you have this utility
+from ...utils import get_default_expense_image_local  
 import uuid
 import os
 import logging
