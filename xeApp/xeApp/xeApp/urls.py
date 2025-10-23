@@ -7,7 +7,7 @@ from xe_farm.views.attendance.attendance_view import employee_report, employee_s
 from xe_farm.views.attendance.pdf_wage_report_view import download_employee_wage_detail_pdf, download_payroll_summary_pdf, download_weekly_wage_summary_pdf, generate_wage_range_pdf, generate_weekly_wage_pdf
 from xe_farm.views.employee.emp_views import (save_employee_data,get_employee_list, get_employee_detail,  edit_employee_data, delete_employee, restore_employee, change_employee_status, toggle_employee_status)
 from xe_farm.views.merchant.merchant_views import (save_merchant_data, get_all_merchants, get_merchant_by_id, update_merchant_data, delete_merchant)
-from xe_farm.views.farm_segment.farm_segment_views import (save_farm_segment_data, get_all_farm_segments, get_farm_segment_by_id, update_farm_segment_data, delete_farm_segment)
+from xe_farm.views.farm_segment.farm_segment_views import (save_farm_segment_data, get_all_farm_segments, get_farm_segment_by_id, search_farm_segments, update_farm_segment_data, delete_farm_segment)
 from xe_farm.views.crops.crop_views import (save_crop_data, get_all_crops, get_crop_by_id, update_crop_data, delete_crop)
 from xe_farm.views.crop_variant.crop_variant_views import (get_all_crop_variants,  save_crop_variant, get_crop_variant_by_id, update_crop_variant, delete_crop_variant, get_crop_variants_by_crop)
 from xe_farm.views.yield_data.yield_views import (add_bill_image, get_crop_comparison_dashboard, get_crop_dashboard, get_crop_performance_metrics,update_yield_with_image_options, get_all_yields, get_bill_images, remove_bill_image, replace_bill_images, save_yield_data, get_yield_by_id, update_yield_data, delete_yield, get_yield_summary)
@@ -43,6 +43,7 @@ urlpatterns = [
     # Farm Segment URLs
     path('api/farm-segments/', save_farm_segment_data, name='save_farm_segment'),
     path('api/farm-segments/all/', get_all_farm_segments, name='get_all_farm_segments'),
+    path('api/farm-segments/search/', search_farm_segments, name='search_farm_segments'),
     path('api/farm-segments/<str:farm_id>/',get_farm_segment_by_id, name='get_farm_segment_by_id'),
     path('api/farm-segments/<str:farm_id>/update/', update_farm_segment_data, name='update_farm_segment'),
     path('api/farm-segments/<str:farm_id>/delete/', delete_farm_segment, name='delete_farm_segment'),

@@ -357,18 +357,18 @@ def edit_employee_data(request, employee_id):
         
         validated_data = serializer.validated_data
         
-        # Check if contact number already exists (excluding current employee)
-        contact = validated_data.get('contact')
-        if contact:
-            existing_employee = Employee.objects.filter(
-                contact=contact
-            ).exclude(id=employee_id).first()
+        # # Check if contact number already exists (excluding current employee)
+        # contact = validated_data.get('contact')
+        # if contact:
+        #     existing_employee = Employee.objects.filter(
+        #         contact=contact
+        #     ).exclude(id=employee_id).first()
             
-            if existing_employee:
-                return Response({
-                    'status': 'error',
-                    'message': 'Employee with this contact number already exists'
-                }, status=status.HTTP_400_BAD_REQUEST)
+        #     if existing_employee:
+        #         return Response({
+        #             'status': 'error',
+        #             'message': 'Employee with this contact number already exists'
+        #         }, status=status.HTTP_400_BAD_REQUEST)
         
         # Validate choice fields if they're being updated
         emp_type = validated_data.get('emp_type')

@@ -2,6 +2,7 @@ from rest_framework.decorators import api_view
 from rest_framework.response import Response
 from rest_framework import status
 from django.db import IntegrityError
+from django.db.models import Q
 from ...models import FarmSegment
 from ...serializers import FarmSegmentSerializer
 
@@ -86,6 +87,52 @@ def get_all_farm_segments(request):
             'data': serializer.data,
             'count': farm_segments.count()
         }, status=status.HTTP_200_OK)
+        
+    except Exception as e:
+        print(f"Server error: {e}")
+        return Response({
+            'status': 'error',
+            'message': f'An error occurred: {str(e)}'
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+@api_view(['GET'])
+def search_farm_segments(request):
+    """
+    Search farm segments by query string
+    Supports searching by: farm_name
+    Usage: /api/farm-segments/search/?q=searchterm
+    """
+    try:
+        # Get search query from request parameters
+        search_query = request.GET.get('q', '').strip()
+        
+        if not search_query:
+            return Response({
+                'status': 'error',
+                'message': 'Search query parameter "q" is required'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Search only farm_name field (adjust based on your actual model fields)
+        farm_segments = FarmSegment.objects.filter(
+            Q(farm_name__icontains=search_query)
+        ).order_by('-created_at')
+        
+        serializer = FarmSegmentSerializer(farm_segments, many=True)
+        
+        return Response({
+            'status': 'success',
+            'message': f'Found {farm_segments.count()} farm segment(s)',
+            'data': serializer.data,
+            'count': farm_segments.count(),
+            'query': search_query
+        }, status=status.HTTP_200_OK)
+        
+    except Exception as e:
+        print(f"Server error: {e}")
+        return Response({
+            'status': 'error',
+            'message': f'An error occurred: {str(e)}'
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         
     except Exception as e:
         print(f"Server error: {e}")
