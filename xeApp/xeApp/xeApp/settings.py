@@ -12,7 +12,7 @@ MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
 
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/
-
+OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
 # SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = 'django-insecure-8-$+a76tjjc=jsq%$8$4lvw9tjdt)l#3ci1&m&4i$tq-20nbqx'
 

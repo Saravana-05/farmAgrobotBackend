@@ -1531,3 +1531,71 @@ def get_wage_for_date(employee, target_date):
     ).order_by('-effective_from')  # Get the most recent one if multiple
     
     return wages.first() if wages.exists() else None
+    
+    
+# events for new website scrapping website through open api
+class ScrapedEvent(models.Model):
+    # Event identification
+    event_id = models.CharField(max_length=255, unique=True)
+    source_platform = models.CharField(max_length=100)
+    source_url = models.URLField(max_length=500)
+    
+    # Basic info
+    event_name = models.CharField(max_length=500)
+    event_type = models.CharField(max_length=100, null=True, blank=True)
+    event_category = models.CharField(max_length=100, null=True, blank=True)
+    event_format = models.CharField(max_length=50, null=True, blank=True)
+    event_status = models.CharField(max_length=50, default='Scheduled')
+    recurrence = models.CharField(max_length=50, null=True, blank=True)
+    
+    # Datetime fields
+    start_datetime = models.DateTimeField(null=True, blank=True)
+    end_datetime = models.DateTimeField(null=True, blank=True)
+    duration_minutes = models.IntegerField(null=True, blank=True)
+    duration_iso = models.CharField(max_length=50, null=True, blank=True)
+    registration_open = models.DateTimeField(null=True, blank=True)
+    registration_close = models.DateTimeField(null=True, blank=True)
+    submission_deadline = models.DateTimeField(null=True, blank=True)
+    
+    # Location
+    venue_name = models.CharField(max_length=300, null=True, blank=True)
+    city = models.CharField(max_length=100, null=True, blank=True)
+    state = models.CharField(max_length=100, null=True, blank=True)
+    country = models.CharField(max_length=100, null=True, blank=True)
+    venue_capacity = models.IntegerField(null=True, blank=True)
+    
+    # Financial
+    registration_fee = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    currency = models.CharField(max_length=10, null=True, blank=True)
+    
+    # Arrays (use JSONField for SQLite, ArrayField for PostgreSQL)
+    sponsors = models.JSONField(default=list, blank=True)
+    partners = models.JSONField(default=list, blank=True)
+    tags = models.JSONField(default=list, blank=True)
+    
+    # Organiser
+    organiser_name = models.CharField(max_length=300, null=True, blank=True)
+    organiser_contact_email = models.EmailField(null=True, blank=True)
+    organiser_contact_phone = models.CharField(max_length=50, null=True, blank=True)
+    organiser_location_country = models.CharField(max_length=100, null=True, blank=True)
+    
+    # Additional info
+    target_audience = models.TextField(null=True, blank=True)
+    eligibility_criteria = models.TextField(null=True, blank=True)
+    language = models.CharField(max_length=10, default='en')
+    agenda_link = models.URLField(max_length=500, null=True, blank=True)
+    post_event_materials_link = models.URLField(max_length=500, null=True, blank=True)
+    expected_attendance = models.IntegerField(null=True, blank=True)
+    registration_url = models.URLField(max_length=500, null=True, blank=True)
+    
+    # Metadata
+    last_updated = models.DateTimeField(auto_now=True)
+    notes = models.TextField(null=True, blank=True)
+    
+    class Meta:
+        ordering = ['-start_datetime']
+        indexes = [
+            models.Index(fields=['start_datetime']),
+            models.Index(fields=['city', 'country']),
+            models.Index(fields=['event_category']),
+        ]

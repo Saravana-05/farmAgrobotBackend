@@ -7,7 +7,7 @@ from venv import logger
 from django.db.models import Q, Sum, Count, Avg
 from django.http import HttpResponse
 from rest_framework.decorators import api_view, parser_classes
-from rest_framework.parsers import MultiPartParser, FormParser
+from rest_framework.parsers import MultiPartParser, FormParser,JSONParser
 from rest_framework.response import Response
 from rest_framework import status
 from django.db import transaction, IntegrityError
@@ -25,7 +25,7 @@ from ...serializers import (
 )
 
 @api_view(['POST'])
-@parser_classes([MultiPartParser, FormParser])
+@parser_classes([JSONParser, MultiPartParser, FormParser])
 def save_sale_data(request):
     """
     Save sale data to the database with sale variants and images
@@ -200,7 +200,7 @@ def get_all_sales(request):
             sales = sales.filter(final_amount__lte=max_amount)
         
         # Order by most recent first
-        sales = sales.order_by('-created_at')
+        sales = sales.order_by('-harvest_date')
         
         serializer = SaleSerializer(sales, many=True, context={'request': request})
         
@@ -1855,15 +1855,18 @@ def get_dashboard_revenue(request):
     Uses paid_amount as revenue (actual collected money)
     """
     try:
-        from django.db.models import Sum, Count, Avg
+        from django.db.models import Sum, Count, Avg, Q
         from datetime import datetime, timedelta
         from calendar import monthrange
         from django.utils import timezone
         
         # Get current date info
-        today = timezone.now().date()
+        now = timezone.now()
+        today = now.date()
         current_year = today.year
         current_month = today.month
+        
+        logger.info(f"Dashboard Revenue - Today: {today}, Current time: {now}")
         
         # Calculate date ranges
         current_year_start = today.replace(month=1, day=1)
@@ -1889,9 +1892,12 @@ def get_dashboard_revenue(request):
         last_day_last_month = monthrange(last_month_year, last_month_num)[1]
         last_month_end = today.replace(year=last_month_year, month=last_month_num, day=last_day_last_month)
         
-        # Current week calculation
+        # ✅ FIX: Current week calculation (Monday to Sunday)
         current_week_start = today - timedelta(days=today.weekday())  # Monday
         current_week_end = current_week_start + timedelta(days=6)  # Sunday
+        
+        logger.info(f"Current Week Range: {current_week_start} to {current_week_end}")
+        logger.info(f"Today's weekday: {today.weekday()} (0=Monday, 6=Sunday)")
         
         # Last 7 days
         last_7_days_start = today - timedelta(days=6)
@@ -1918,7 +1924,7 @@ def get_dashboard_revenue(request):
         # Function to calculate metrics for a given queryset
         def calculate_metrics(sales_queryset):
             metrics = sales_queryset.aggregate(
-                total_revenue=Sum('paid_amount'),  # CHANGED: Using paid_amount as revenue
+                total_revenue=Sum('paid_amount'),  # Using paid_amount as revenue
                 total_sales_amount=Sum('final_amount'),  # Total sale value
                 total_paid=Sum('paid_amount'),
                 total_pending=Sum('pending_amount'),
@@ -1958,8 +1964,12 @@ def get_dashboard_revenue(request):
         # Calculate metrics for different time periods
         time_periods = {}
         
+        # ✅ FIX: Use created_at instead of harvest_date for sales dashboard
         # Current Year
-        current_year_sales = base_sales.filter(harvest_date__date__range=[current_year_start, current_year_end])
+        current_year_sales = base_sales.filter(
+            created_at__date__gte=current_year_start,
+            created_at__date__lte=current_year_end
+        )
         time_periods['current_year'] = {
             **calculate_metrics(current_year_sales),
             'period_name': f'Current Year ({current_year})',
@@ -1968,7 +1978,10 @@ def get_dashboard_revenue(request):
         }
         
         # Last Year
-        last_year_sales = base_sales.filter(harvest_date__date__range=[last_year_start, last_year_end])
+        last_year_sales = base_sales.filter(
+            created_at__date__gte=last_year_start,
+            created_at__date__lte=last_year_end
+        )
         time_periods['last_year'] = {
             **calculate_metrics(last_year_sales),
             'period_name': f'Last Year ({last_year})',
@@ -1977,7 +1990,10 @@ def get_dashboard_revenue(request):
         }
         
         # Current Month
-        current_month_sales = base_sales.filter(harvest_date__date__range=[current_month_start, current_month_end])
+        current_month_sales = base_sales.filter(
+            created_at__date__gte=current_month_start,
+            created_at__date__lte=current_month_end
+        )
         time_periods['current_month'] = {
             **calculate_metrics(current_month_sales),
             'period_name': f'Current Month ({today.strftime("%B %Y")})',
@@ -1986,7 +2002,10 @@ def get_dashboard_revenue(request):
         }
         
         # Last Month
-        last_month_sales = base_sales.filter(harvest_date__date__range=[last_month_start, last_month_end])
+        last_month_sales = base_sales.filter(
+            created_at__date__gte=last_month_start,
+            created_at__date__lte=last_month_end
+        )
         last_month_name = last_month_start.strftime("%B %Y")
         time_periods['last_month'] = {
             **calculate_metrics(last_month_sales),
@@ -1995,8 +2014,21 @@ def get_dashboard_revenue(request):
             'end_date': last_month_end.isoformat()
         }
         
-        # Current Week (Monday to Sunday)
-        current_week_sales = base_sales.filter(harvest_date__date__range=[current_week_start, current_week_end])
+        # ✅ FIX: Current Week (Monday to Sunday) - Use created_at
+        current_week_sales = base_sales.filter(
+            created_at__date__gte=current_week_start,
+            created_at__date__lte=current_week_end
+        )
+        
+        # Debug logging for current week
+        week_count = current_week_sales.count()
+        logger.info(f"Current week sales count: {week_count}")
+        
+        if week_count > 0:
+            # Log some sample dates to verify
+            sample_sales = current_week_sales.values('id', 'created_at', 'paid_amount')[:5]
+            logger.info(f"Sample sales in current week: {list(sample_sales)}")
+        
         time_periods['current_week'] = {
             **calculate_metrics(current_week_sales),
             'period_name': f'Current Week ({current_week_start.strftime("%b %d")} - {current_week_end.strftime("%b %d")})',
@@ -2005,7 +2037,10 @@ def get_dashboard_revenue(request):
         }
         
         # Last 7 Days
-        last_7_days_sales = base_sales.filter(harvest_date__date__range=[last_7_days_start, last_7_days_end])
+        last_7_days_sales = base_sales.filter(
+            created_at__date__gte=last_7_days_start,
+            created_at__date__lte=last_7_days_end
+        )
         time_periods['last_7_days'] = {
             **calculate_metrics(last_7_days_sales),
             'period_name': 'Last 7 Days',
@@ -2014,7 +2049,10 @@ def get_dashboard_revenue(request):
         }
         
         # Last 30 Days
-        last_30_days_sales = base_sales.filter(harvest_date__date__range=[last_30_days_start, last_30_days_end])
+        last_30_days_sales = base_sales.filter(
+            created_at__date__gte=last_30_days_start,
+            created_at__date__lte=last_30_days_end
+        )
         time_periods['last_30_days'] = {
             **calculate_metrics(last_30_days_sales),
             'period_name': 'Last 30 Days',
@@ -2048,10 +2086,16 @@ def get_dashboard_revenue(request):
             time_periods['last_month']['total_revenue']
         )
         
+        # Week-over-week comparison (current week vs last 7 days)
+        weekly_revenue_change = calculate_percentage_change(
+            time_periods['current_week']['total_revenue'],
+            time_periods['last_7_days']['total_revenue']
+        )
+        
         # Payment status breakdown for current year
         current_year_payment_breakdown = current_year_sales.values('payment_mode').annotate(
             count=Count('id'),
-            total_amount=Sum('paid_amount')  # CHANGED: Using paid_amount
+            total_amount=Sum('paid_amount')
         ).order_by('-total_amount')
         
         # Convert to list for JSON serialization
@@ -2063,14 +2107,14 @@ def get_dashboard_revenue(request):
                 'total_amount': float(item['total_amount'] or 0)
             })
         
-        # Recent activity (last 7 days)
+        # Recent activity (last 7 days) - Use created_at
         recent_sales = base_sales.filter(
-            harvest_date__gte=timezone.now() - timedelta(days=7)
+            created_at__gte=timezone.now() - timedelta(days=7)
         )
         
         recent_data = recent_sales.aggregate(
             recent_count=Count('id'),
-            recent_revenue=Sum('paid_amount')  # CHANGED: Using paid_amount
+            recent_revenue=Sum('paid_amount')
         )
         
         # Build response
@@ -2088,6 +2132,12 @@ def get_dashboard_revenue(request):
                     'trend': 'up' if monthly_revenue_change > 0 else 'down' if monthly_revenue_change < 0 else 'stable',
                     'current_month_revenue': time_periods['current_month']['total_revenue'],
                     'last_month_revenue': time_periods['last_month']['total_revenue']
+                },
+                'weekly_comparison': {
+                    'percentage_change': weekly_revenue_change,
+                    'trend': 'up' if weekly_revenue_change > 0 else 'down' if weekly_revenue_change < 0 else 'stable',
+                    'current_week_revenue': time_periods['current_week']['total_revenue'],
+                    'last_7_days_revenue': time_periods['last_7_days']['total_revenue']
                 }
             },
             'current_year_breakdown': {
@@ -2115,6 +2165,8 @@ def get_dashboard_revenue(request):
         if filter_info:
             response_data['applied_filters'] = filter_info
         
+        logger.info(f"Dashboard revenue response prepared successfully")
+        
         return Response({
             'status': 'success',
             'message': 'Dashboard revenue data retrieved successfully',
@@ -2122,8 +2174,9 @@ def get_dashboard_revenue(request):
         }, status=status.HTTP_200_OK)
         
     except Exception as e:
-        print(f"Dashboard revenue error: {e}")
-        logger.error(f"Dashboard revenue error: {str(e)}")
+        import traceback
+        error_trace = traceback.format_exc()
+        logger.error(f"Dashboard revenue error: {str(e)}\n{error_trace}")
         return Response({
             'status': 'error',
             'message': f'Internal server error: {str(e)}'

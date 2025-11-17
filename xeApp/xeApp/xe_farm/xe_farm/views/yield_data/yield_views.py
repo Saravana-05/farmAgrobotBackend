@@ -5,6 +5,8 @@ from django.core.exceptions import ValidationError
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 from rest_framework import status
+from django.db.models import Count
+import math
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 import json
 from ...models import Yield, BillImage, YieldFarmSegment, YieldVariant, Crop, FarmSegment, CropVariant
@@ -184,6 +186,7 @@ def save_yield_data(request):
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
+
 @api_view(['GET'])
 def get_all_yields(request):
     try:
@@ -192,6 +195,7 @@ def get_all_yields(request):
         start_date = request.GET.get('start_date')
         end_date = request.GET.get('end_date')
         has_bills = request.GET.get('has_bills')
+        sort_by = request.GET.get('sort_by', 'desc')  # ✅ Default to descending
 
         yields = Yield.objects.select_related('crop').prefetch_related(
             'yield_variants__crop_variant',
@@ -199,39 +203,44 @@ def get_all_yields(request):
             'bill_images'
         )
 
+        # === Filters ===
         if crop_id:
             yields = yields.filter(crop_id=crop_id)
-
         if farm_segment_id:
             yields = yields.filter(yield_farm_segments__farm_segment_id=farm_segment_id)
-
         if start_date:
             yields = yields.filter(harvest_date__gte=start_date)
-
         if end_date:
             yields = yields.filter(harvest_date__lte=end_date)
-
         if has_bills is not None:
-            yields = yields.annotate(bill_count=count('bill_images'))
+            yields = yields.annotate(bill_count=Count('bill_images'))
             if has_bills.lower() == 'true':
                 yields = yields.filter(bill_count__gt=0)
             elif has_bills.lower() == 'false':
                 yields = yields.filter(bill_count=0)
 
-        yields = yields.order_by('-created_at').distinct()
+        # === Sorting ===
+        if sort_by.lower() == 'asc':
+            yields = yields.order_by('harvest_date', 'created_at')  # oldest first
+        else:
+            yields = yields.order_by('-harvest_date', '-created_at')  # newest first (default)
 
-        page_size = request.GET.get('page_size')
-        page = request.GET.get('page')
+        yields = yields.distinct()
 
-        if page_size and page:
-            try:
-                page_size = int(page_size)
-                page = int(page)
-                start = (page - 1) * page_size
-                end = start + page_size
-                yields = yields[start:end]
-            except (ValueError, TypeError):
-                pass
+        # === Pagination ===
+        try:
+            page_size = int(request.GET.get('page_size', 10))
+            page = int(request.GET.get('page', 1))
+        except ValueError:
+            page_size = 10
+            page = 1
+
+        total_count = yields.count()
+        total_pages = math.ceil(total_count / page_size) if page_size > 0 else 1
+
+        start = (page - 1) * page_size
+        end = start + page_size
+        yields = yields[start:end]
 
         serializer = YieldSerializer(yields, many=True, context={'request': request})
 
@@ -239,7 +248,14 @@ def get_all_yields(request):
             'status': 'success',
             'message': 'Yields retrieved successfully',
             'data': serializer.data,
-            'count': len(serializer.data)
+            'count': len(serializer.data),
+            'total_count': total_count,
+            'page': page,
+            'page_size': page_size,
+            'total_pages': total_pages,
+            'has_next': page < total_pages,
+            'has_previous': page > 1,
+            'sort_by': sort_by,  # ✅ for frontend reference
         }, status=status.HTTP_200_OK)
 
     except Exception as e:
@@ -248,6 +264,7 @@ def get_all_yields(request):
             'status': 'error',
             'message': f'An error occurred: {str(e)}'
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
 
 
 @api_view(['GET'])
