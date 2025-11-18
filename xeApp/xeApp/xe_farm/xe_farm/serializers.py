@@ -4,6 +4,7 @@ from django.conf import settings
 from django.db import transaction
 from rest_framework import serializers
 from django.core.validators import MinValueValidator
+from django.contrib.auth.models import User
 from .models import  AttendanceRecord, BillImage, BulkWagePayment, Employee,  Merchant, FarmSegment, Crop, CropVariant, PaymentHistory, SaleImage, Wage, WeeklyWagePayment,  Yield, YieldVariant, YieldFarmSegment, Sale, SaleVariant, Job, JobEmployee,JobFarmSegment, Expense, get_wage_for_date, ScrapedEvent
 
 
@@ -1441,6 +1442,10 @@ class EventSerializer(serializers.ModelSerializer):
     class Meta:
         model = ScrapedEvent
         fields = '__all__'
+class UserSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = User
+        fields = "__all__"
 
 
 

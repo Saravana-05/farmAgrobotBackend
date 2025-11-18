@@ -17,7 +17,7 @@ from ...serializers import (
     AttendanceRecordSerializer
 )
 from ...models import AttendanceRecord, BulkWagePayment, Employee, Wage, WeeklyWagePayment, WeeklyWagePaymentManager,Expense
-from xe_farm import models
+from xe_farm.xe_farm import models
 
 
 def get_wage_for_date(employee, target_date):

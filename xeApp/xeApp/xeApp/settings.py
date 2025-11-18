@@ -1,7 +1,6 @@
 import os
 from pathlib import Path
 
-
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -34,6 +33,7 @@ INSTALLED_APPS = [
     'rest_framework',
     'corsheaders',
     'xe_farm',
+    'rest_framework.authtoken',
 ]
 
 MIDDLEWARE = [
@@ -85,8 +85,8 @@ DATABASES = {
         'NAME': 'farm_management',
         'USER': 'root',
         'PASSWORD':'',
-        'HOST': '127.0.0.1',
-        'PORT': '3306',
+        'HOST': 'localhost',
+        'PORT': '3307',
     }
 }
 
