@@ -10,6 +10,9 @@ def login(request):
     if user.check_password(request.data['password']):
         token = Token.objects.create(user=user)
         return Response({"message":"Login successfull", "token":token.key},status=status.HTTP_200_OK)
+    else:
+        return Response({"message": "invalid data"})
+
 
 @api_view(["POST"])
 def logout(request):
