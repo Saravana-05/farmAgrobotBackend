@@ -1,5 +1,10 @@
 {
+      "python.defaultInterpreterPath": "D:/xe/farmAgrobotBackend/xeApp/xeApp/venv/Scripts/python.exe",
+
     "python.analysis.extraPaths": [
-        "./xeApp/xeApp/xe_farm"
+        "./xeApp/xeApp/xe_farm",
+            "D:/xe/farmAgrobotBackend/xeApp/xeApp/venv/Lib/site-packages"
+
     ]
+
 }

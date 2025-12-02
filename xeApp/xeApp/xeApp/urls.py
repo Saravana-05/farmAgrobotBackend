@@ -5,24 +5,21 @@ from django.conf import settings
 from django.conf.urls.static import static
 
 # from xe_farm.xe_farm.views.events.events_views import fetch_website
-from xe_farm.xe_farm.views.attendance.attendance_view import employee_report, employee_summary_report, single_employee_report, wage_payment_details, wage_payment_history, export_attendance, get_active_employees, get_attendance, mark_attendance, pay_wages, update_attendance, update_single_attendance, validate_employees_for_attendance, wage_summary, weekly_data, weekly_wages_report
-from xe_farm.xe_farm.views.attendance.pdf_wage_report_view import download_employee_wage_detail_pdf, download_payroll_summary_pdf, download_weekly_wage_summary_pdf, generate_wage_range_pdf, generate_weekly_wage_pdf
-from xe_farm.xe_farm.views.employee.emp_views import (save_employee_data,get_employee_list, get_employee_detail,  edit_employee_data, delete_employee, restore_employee, change_employee_status, toggle_employee_status)
-from xe_farm.xe_farm.views.merchant.merchant_views import (save_merchant_data, get_all_merchants, get_merchant_by_id, update_merchant_data, delete_merchant)
-from xe_farm.xe_farm.views.farm_segment.farm_segment_views import (save_farm_segment_data, get_all_farm_segments, get_farm_segment_by_id, search_farm_segments, update_farm_segment_data, delete_farm_segment)
-from xe_farm.xe_farm.views.crops.crop_views import (save_crop_data, get_all_crops, get_crop_by_id, update_crop_data, delete_crop)
-from xe_farm.xe_farm.views.crop_variant.crop_variant_views import (get_all_crop_variants,  save_crop_variant, get_crop_variant_by_id, update_crop_variant, delete_crop_variant, get_crop_variants_by_crop)
-from xe_farm.xe_farm.views.yield_data.yield_views import (add_bill_image, get_crop_comparison_dashboard, get_crop_dashboard, get_crop_performance_metrics,update_yield_with_image_options, get_all_yields, get_bill_images, remove_bill_image, replace_bill_images, save_yield_data, get_yield_by_id, update_yield_data, delete_yield, get_yield_summary)
-from xe_farm.xe_farm.views.sales.sale_view import (add_payment, add_sale_images, advanced_sales_search, delete_sale_image, generate_bulk_pdf_report, generate_excel_report, generate_pdf_bill, get_available_yields, get_dashboard_revenue, get_payment_history, get_payment_modes, get_quick_stats, get_revenue_by_period, get_sale_images, get_yield_variants, save_sale_data, get_all_sales, get_sale_by_id, search_suggestions, update_sale_data, delete_sale, update_sale_image, update_sale_status, get_sales_by_merchant, get_sale_summary, get_sales_analytics)
-from xe_farm.xe_farm.views.jobs.job_view import (
-    create_job, get_all_jobs, get_job_by_id, update_job, delete_job,
-)
-from xe_farm.xe_farm.views.expense.expense_view import (get_expense_comparison_stats, get_expense_dashboard_stats, get_expense_summary_by_period, get_monthly_trend_data, save_expense_data, get_expense_list, get_expense_detail, edit_expense_data, delete_expense, get_expense_statistics
-)   
-from xe_farm.xe_farm.views.wages.wages_view import ( save_wage_data, get_wage_list, get_wage_detail, edit_wage_data, delete_wage, get_employee_wages, end_current_wage, get_wage_statistics)
+from xe_farm.views.attendance.attendance_view import employee_report, employee_summary_report, single_employee_report, wage_payment_details, wage_payment_history, export_attendance, get_active_employees, get_attendance, mark_attendance, pay_wages, update_attendance, update_single_attendance, validate_employees_for_attendance, wage_summary, weekly_data, weekly_wages_report
+from xe_farm.views.attendance.pdf_wage_report_view import download_employee_wage_detail_pdf, download_payroll_summary_pdf, download_weekly_wage_summary_pdf, generate_wage_range_pdf, generate_weekly_wage_pdf
+from xe_farm.views.employee.emp_views import (save_employee_data,get_employee_list, get_employee_detail,  edit_employee_data, delete_employee, restore_employee, change_employee_status, toggle_employee_status)
+from xe_farm.views.merchant.merchant_views import (save_merchant_data, get_all_merchants, get_merchant_by_id, update_merchant_data, delete_merchant)
+from xe_farm.views.farm_segment.farm_segment_views import (save_farm_segment_data, get_all_farm_segments, get_farm_segment_by_id, search_farm_segments, update_farm_segment_data, delete_farm_segment)
+from xe_farm.views.crops.crop_views import (save_crop_data, get_all_crops, get_crop_by_id, update_crop_data, delete_crop)
+from xe_farm.views.crop_variant.crop_variant_views import (get_all_crop_variants,  save_crop_variant, get_crop_variant_by_id, update_crop_variant, delete_crop_variant, get_crop_variants_by_crop)
+from xe_farm.views.yield_data.yield_views import (add_bill_image, get_crop_comparison_dashboard, get_crop_dashboard, get_crop_performance_metrics,update_yield_with_image_options, get_all_yields, get_bill_images, remove_bill_image, replace_bill_images, save_yield_data, get_yield_by_id, update_yield_data, delete_yield, get_yield_summary)
+from xe_farm.views.sales.sale_view import (add_payment, add_sale_images, advanced_sales_search, delete_sale_image, generate_bulk_pdf_report, generate_excel_report, generate_pdf_bill, get_available_yields, get_dashboard_revenue, get_payment_history, get_payment_modes, get_quick_stats, get_revenue_by_period, get_sale_images, get_yield_variants, save_sale_data, get_all_sales, get_sale_by_id, search_suggestions, update_sale_data, delete_sale, update_sale_image, update_sale_status, get_sales_by_merchant, get_sale_summary, get_sales_analytics)
+from xe_farm.views.jobs.job_view import (create_job, get_all_jobs, get_job_by_id, update_job, delete_job,)
+from xe_farm.views.expense.expense_view import (get_expense_comparison_stats, get_expense_dashboard_stats, get_expense_summary_by_period, get_monthly_trend_data, save_expense_data, get_expense_list, get_expense_detail, edit_expense_data, delete_expense, get_expense_statistics)   
+from xe_farm.views.wages.wages_view import ( save_wage_data, get_wage_list, get_wage_detail, edit_wage_data, delete_wage, get_employee_wages, end_current_wage, get_wage_statistics)
 # from your_imports import *   # all your view imports
-from xe_farm.xe_farm.views.login.login_view import login,logout
-from xe_farm.xe_farm.views.register.register_view import register
+from xe_farm.views.login.login_view import login,logout
+from xe_farm.views.register.register_view import register
 
 urlpatterns = [
 

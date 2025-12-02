@@ -36,6 +36,7 @@ INSTALLED_APPS = [
     'rest_framework.authtoken',
 ]
 
+
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
@@ -82,11 +83,14 @@ DATABASES = {
 
         # Local Server
         'ENGINE': 'django.db.backends.mysql',
-        'NAME': 'farm_management',
+        'NAME': 'xe_farm',
         'USER': 'root',
         'PASSWORD':'',
         'HOST': 'localhost',
-        'PORT': '3307',
+        'PORT': '3306',
+        'OPTIONS': {
+            'sql_mode': 'STRICT_TRANS_TABLES',
+        }
     }
 }
 
@@ -108,6 +112,7 @@ AUTH_PASSWORD_VALIDATORS = [
         'NAME': 'django.contrib.auth.password_validation.NumericPasswordValidator',
     },
 ]
+
 
 
 # Internationalization
@@ -138,3 +143,13 @@ CORS_ALLOWED_ORIGINS = [
 CORS_ALLOW_ALL_ORIGINS = True
 # CORS settings for Flutter
 CORS_ALLOW_ALL_ORIGINS = True 
+
+REST_FRAMEWORK = {
+    # 'DEFAULT_AUTHENTICATION_CLASSES': [
+    #     'rest_framework.authentication.TokenAuthentication',
+    # ],
+    # 'DEFAULT_PERMISSION_CLASSES': [
+    #     'rest_framework.permissions.IsAuthenticated',
+    # ]
+        
+}

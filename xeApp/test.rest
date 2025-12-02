@@ -1,0 +1,28 @@
+###login
+POST http://127.0.0.1:8000/login/
+Content-Type: application/json
+
+{
+    "username":"test11",
+    "password": "test112"
+}
+
+###register
+POST http://127.0.0.1:8000/register/
+Content-Type: application/json
+
+{
+    "username":"sample1",
+    "password": "abc12",
+    "email":"test@gmail.com",
+    "role":"employee"
+}
+
+###logout
+POST http://127.0.0.1:8000/logout/
+Content-Type: application/json
+Authorization: Token 699d5e3c9deb17ae5cb429c6d357b25b08b5d414
+
+{
+    "token": "699d5e3c9deb17ae5cb429c6d357b25b08b5d414"
+}
