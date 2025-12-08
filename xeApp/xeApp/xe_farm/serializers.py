@@ -1459,6 +1459,16 @@ class UserSerializer(serializers.ModelSerializer):
         )
         UserProfile.objects.create(user = user , role = role)
         return user
+    def update(self, instance, validated_data):
+        role = validated_data.pop('role')
+        instance.username = validated_data.get('username', instance.username)
+        instance.email = validated_data.get('email', instance.email)
+        instance.password = validated_data.get('password', instance.password)
+        
+        if role:
+            instance.userprofile.role = role
+            instance.userprofile.save()
+        return instance
 
 
 
