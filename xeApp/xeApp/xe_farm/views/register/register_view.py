@@ -5,7 +5,7 @@ from ...serializers import UserSerializer, AssignPageSerializer
 from rest_framework.permissions import IsAdminUser, IsAuthenticated
 from ...models import User, Role, Page, AssignPage, UserProfile # Using relative import (go up 2 levels)
 
-# permission_classes( IsAdminUser)
+permission_classes( IsAdminUser)
 @api_view(["POST"])
 def register(request):
     user = UserSerializer(data = request.data)
@@ -15,7 +15,7 @@ def register(request):
     else:
         return Response({"message":"invalid data"})
 
-# permission_classes(IsAdminUser)
+permission_classes(IsAdminUser)
 @api_view(["PUT"])
 def update_user(request, user_id):
     try:
@@ -29,7 +29,7 @@ def update_user(request, user_id):
     else:
         return Response({"message":"invalid data"}, status = status.HTTP_400_BAD_REQUEST)
 
-# permission_classes(IsAdminUser)
+permission_classes(IsAdminUser)
 @api_view(["DELETE"])
 def delete_user(request, user_id):
     try:
@@ -39,6 +39,7 @@ def delete_user(request, user_id):
     user.delete()
     return Response({"message":"User deleted successfully"}, status = status.HTTP_200_OK)
 
+permission_classes(IsAdminUser)
 @api_view(["POST"])
 def assign_pages_to_role(request, role_id):
     page_list = request.data.get('page',[])
@@ -52,7 +53,8 @@ def assign_pages_to_role(request, role_id):
         page_obj, created = Page.objects.get_or_create(name = p.strip().capitalize())
         AssignPage.objects.create(role = role,page=page_obj)
     return Response({"message":"pages were added"}, status=status.HTTP_200_OK)
- 
+
+permission_classes(IsAdminUser) 
 @api_view(["GET"])
 def get_assigned_page(request, user_id):
     try:
