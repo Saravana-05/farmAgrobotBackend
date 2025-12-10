@@ -8,12 +8,16 @@ from rest_framework.permissions import AllowAny
 @api_view(["POST"])
 @permission_classes([AllowAny])
 def login(request):
-    user = User.objects.get(username=request.data["username"])
-    if user.check_password(request.data['password']):
-        token = Token.objects.create(user=user)
-        return Response({"message":"Login successfull", "token":token.key},status=status.HTTP_200_OK)
-    else:
-        return Response({"message": "invalid data"})
+    try:
+        user = User.objects.get(username=request.data["username"])
+        if user.check_password(request.data['password']):
+            token = Token.objects.create(user=user)
+            return Response({"message":"Login successfull", "token":token.key},status=status.HTTP_200_OK)
+        else:
+            return Response({"message": "invalid data"})
+    except User.DoesNotExist:
+        return Response({"message":"User Does not exist"}, status= status.HTTP_404_NOT_FOUND)
+   
 
 @api_view(["POST"])
 def logout(request):

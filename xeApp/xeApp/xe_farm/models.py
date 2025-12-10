@@ -1602,16 +1602,31 @@ class ScrapedEvent(models.Model):
             models.Index(fields=['city', 'country']),
             models.Index(fields=['event_category']),
         ]
-
-class UserProfile(models.Model):
-    ROLE_CHOICES = [
-        ('admin', 'Admin'),
-        ('manager', 'Manager'),
-        ('employee', 'Employee'),
-        ('user', 'User')
-    ]
-    user = models.OneToOneField(User, on_delete=models.CASCADE)
-    role = models.CharField(max_length=20,choices=ROLE_CHOICES)
+class Role(models.Model):
+    name = models.CharField(max_length = 100, unique=True)
     
     def __str__(self):
+        return self.name
+    
+class Page(models.Model):
+    name = models.CharField(max_length=100, unique=True)
+    
+    def __str__(self):
+        return self.name
+    
+class UserProfile(models.Model):
+    user = models.OneToOneField(User, on_delete=models.CASCADE)
+    role = models.ForeignKey(Role, on_delete=models.SET_NULL, null=True)
+     
+    def __str__(self): 
         return self.user.username
+    
+class AssignPage(models.Model):
+    page = models.ForeignKey(Page, on_delete=models.CASCADE)
+    role = models.ForeignKey(Role, on_delete=models.CASCADE)
+    
+    class Meta:
+        unique_together = ('role', 'page')
+    
+    def __str__(self):
+        return {self.role.name}

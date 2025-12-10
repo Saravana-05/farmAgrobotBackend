@@ -4,7 +4,7 @@ from django.conf import settings
 from django.db import transaction
 from rest_framework import serializers
 from django.core.validators import MinValueValidator
-from .models import UserProfile,User
+from .models import UserProfile,User, Page, Role
 from .models import  AttendanceRecord, BillImage, BulkWagePayment, Employee,  Merchant, FarmSegment, Crop, CropVariant, PaymentHistory, SaleImage, Wage, WeeklyWagePayment,  Yield, YieldVariant, YieldFarmSegment, Sale, SaleVariant, Job, JobEmployee,JobFarmSegment, Expense, get_wage_for_date, ScrapedEvent
 
 
@@ -1457,19 +1457,24 @@ class UserSerializer(serializers.ModelSerializer):
             email = validated_data.get('email'),
             password = validated_data['password'],
         )
+        role, created = Role.objects.get_or_create(name = role.strip().capitalize())
         UserProfile.objects.create(user = user , role = role)
         return user
     def update(self, instance, validated_data):
         role = validated_data.pop('role')
         instance.username = validated_data.get('username', instance.username)
         instance.email = validated_data.get('email', instance.email)
-        instance.password = validated_data.get('password', instance.password)
-        
+        instance.save()
         if role:
-            instance.userprofile.role = role
-            instance.userprofile.save()
+            role, created = Role.objects.get_or_create(name  = role.strip().capitalize())
+            profile = UserProfile.objects.get(user = instance)
+            profile.role = role
+            profile.save()
         return instance
-
-
+class AssignPageSerializer(serializers.Serializer):
+    role_id = serializers.IntegerField()
+    page = serializers.ListField(
+        child = serializers.CharField(max_length = 100 )
+    )
 
  

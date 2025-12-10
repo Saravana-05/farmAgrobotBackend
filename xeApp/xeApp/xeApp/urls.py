@@ -19,7 +19,7 @@ from xe_farm.views.expense.expense_view import (get_expense_comparison_stats, ge
 from xe_farm.views.wages.wages_view import ( save_wage_data, get_wage_list, get_wage_detail, edit_wage_data, delete_wage, get_employee_wages, end_current_wage, get_wage_statistics)
 # from your_imports import *   # all your view imports
 from xe_farm.views.login.login_view import login,logout
-from xe_farm.views.register.register_view import register, update_user, delete_user
+from xe_farm.views.register.register_view import register, update_user, delete_user, assign_pages_to_role, get_assigned_page
 
 urlpatterns = [
 
@@ -198,8 +198,10 @@ urlpatterns = [
     path("login/", login, name="login"),
     path("logout/",logout, name = "logout"),
     path("register/", register, name = "register"),
-    path("user/<int:user_id>/update/", update_user, name="update_user"),
-    path("user/<int:user_id>/delete/", delete_user, name="delete_user"),
+    path("register/update/<int:user_id>/", update_user, name="update_user"),
+    path("register/delete/<int:user_id>/", delete_user, name="delete_user"),
+    path("assign/page/<int:role_id>/",assign_pages_to_role, name = "assign_page"),
+    path("user/<int:user_id>/", get_assigned_page, name="get_page")
    
 
 ]
