@@ -11,7 +11,8 @@ def create_jobs(request):
     if serializer.is_valid():
         serializer.save()
         return Response({"message": "jobs created successfully"}, status = status.HTTP_201_CREATED)
-    return Response({"message": "invalid data"}, status=status.HTTP_400_BAD_REQUEST)
+    else:
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 #edit job
 @api_view(["PUT"])
 def update_jobs(request, job_id):
@@ -23,7 +24,7 @@ def update_jobs(request, job_id):
     if serializer.is_valid():
         serializer.save()
         return Response({"message": "jobs updated successfully"}, status = status.HTTP_200_OK)
-    return Response({"message": "invalid data"}, status = status.HTTP_400_BAD_REQUEST)
+    return Response(serializer.errors, status = status.HTTP_400_BAD_REQUEST)
 #delete job
 @api_view(["DELETE"])
 def delete_jobs(request, job_id):
@@ -93,3 +94,22 @@ def job_assign(request):
             return Response({"message":"Employee not found"}, status = status.HTTP_404_NOT_FOUND)
         
     return Response({"invalid Data"}, status = status.HTTP_400_BAD_REQUEST)
+@api_view(["PUT"])
+def update_status(request,job_id):
+    try:
+        job_status = Jobs.objects.get(id = job_id)
+    except Jobs.DoesNotExist:
+        return Response({"message":"job_id is not found"}, status=status.HTTP_404_NOT_FOUND)
+    
+    status_value = request.data.get("status")
+    reason = request.data.get("incomplete_reason")
+    
+    if status_value not in ['completed','incompleted']:
+        return Response({"give valid status"}, status=status.HTTP_400_BAD_REQUEST)
+    if status_value =="incompleted" and not reason:
+        return Response({"message":"if the status is incompleted then reason is required"})
+    
+    job_status.status = status_value
+    job_status.incomplete_reason = reason if status_value == "incompleted" else None
+    job_status.save()
+    return Response("status were updated")

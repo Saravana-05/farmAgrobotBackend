@@ -1,10 +1,11 @@
 from datetime import date, datetime
+from django.utils import timezone
 from decimal import Decimal
 from django.conf import settings
 from django.db import transaction
 from rest_framework import serializers
 from django.core.validators import MinValueValidator
-from .models import UserProfile,User, Page, Role, Jobs
+from .models import UserProfile,User, Page, Role, Jobs , JobAssignment
 from .models import  AttendanceRecord, BillImage, BulkWagePayment, Employee,  Merchant, FarmSegment, Crop, CropVariant, PaymentHistory, SaleImage, Wage, WeeklyWagePayment,  Yield, YieldVariant, YieldFarmSegment, Sale, SaleVariant, Job, JobEmployee,JobFarmSegment, Expense, get_wage_for_date, ScrapedEvent
 
 
@@ -1444,11 +1445,17 @@ class EventSerializer(serializers.ModelSerializer):
         fields = '__all__'
 #jobs
 class JobsSerializer(serializers.ModelSerializer):
-    name = serializers.CharField(max_length = 200)
     class Meta:
         model = Jobs
-        fields = '__all__'
+        fields = '__all__'  
         
+    def validate(self,data):
+        start_date = data.get("start_date", getattr(self.instance,'start_date', None))
+        end_date = data.get("end_date", getattr(self.instance,'end_date', None))
+        if start_date and end_date and end_date < start_date:
+            raise serializers.ValidationError("end_date cannot be before start_date")        
+        return data
+   
 #Register
 class UserSerializer(serializers.ModelSerializer):
     role = serializers.CharField(write_only=True)

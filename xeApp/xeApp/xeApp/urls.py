@@ -20,7 +20,7 @@ from xe_farm.views.wages.wages_view import ( save_wage_data, get_wage_list, get_
 # from your_imports import *   # all your view imports
 from xe_farm.views.login.login_view import login,logout
 from xe_farm.views.register.register_view import register, update_user, delete_user, assign_pages_to_role, get_assigned_page
-from xe_farm.views.jobs.jobs_view import get_jobs,get_jobs_by_id, create_jobs, update_jobs, delete_jobs, job_assigning_dropdown, job_assign
+from xe_farm.views.jobs.jobs_view import get_jobs,get_jobs_by_id, create_jobs, update_jobs, delete_jobs, job_assigning_dropdown, job_assign, update_status
 
 
 urlpatterns = [
@@ -139,6 +139,7 @@ urlpatterns = [
     path('api/job/delete/<int:job_id>/', delete_jobs, name = 'delete_jobs'),
     path('api/job/emp/', job_assigning_dropdown, name = 'get_employee'),
     path('api/job/assign/', job_assign, name = 'assign_job'),
+    path('api/job/status/<int:job_id>/', update_status, name = 'update_status'),
     
 
      # Expense URLs
