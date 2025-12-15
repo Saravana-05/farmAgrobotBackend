@@ -1602,6 +1602,20 @@ class ScrapedEvent(models.Model):
             models.Index(fields=['city', 'country']),
             models.Index(fields=['event_category']),
         ]
+        
+#jobs
+class Jobs(models.Model):
+    name = models.CharField(max_length = 200)
+    def __str__(self):
+        return self.name    
+       
+class JobAssignment(models.Model):
+    job = models.ForeignKey(Jobs, on_delete=models.CASCADE)
+    employee = models.ForeignKey(Employee, on_delete=models.CASCADE)
+    def __str__(self):
+        return self.job.name
+
+#Register 
 class Role(models.Model):
     name = models.CharField(max_length = 100, unique=True)
     

@@ -4,7 +4,7 @@ from django.conf import settings
 from django.db import transaction
 from rest_framework import serializers
 from django.core.validators import MinValueValidator
-from .models import UserProfile,User, Page, Role
+from .models import UserProfile,User, Page, Role, Jobs
 from .models import  AttendanceRecord, BillImage, BulkWagePayment, Employee,  Merchant, FarmSegment, Crop, CropVariant, PaymentHistory, SaleImage, Wage, WeeklyWagePayment,  Yield, YieldVariant, YieldFarmSegment, Sale, SaleVariant, Job, JobEmployee,JobFarmSegment, Expense, get_wage_for_date, ScrapedEvent
 
 
@@ -15,7 +15,7 @@ class EmployeeSerializer(serializers.ModelSerializer):
         model = Employee
         fields = [
             'id', 'name', 'tamil_name', 'joining_date', 
-            'emp_type', 'gender','image_url', 
+            'emp_type', 'gender','image_url',  
             'contact', 'status', 'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
@@ -1442,7 +1442,14 @@ class EventSerializer(serializers.ModelSerializer):
     class Meta:
         model = ScrapedEvent
         fields = '__all__'
-
+#jobs
+class JobsSerializer(serializers.ModelSerializer):
+    name = serializers.CharField(max_length = 200)
+    class Meta:
+        model = Jobs
+        fields = '__all__'
+        
+#Register
 class UserSerializer(serializers.ModelSerializer):
     role = serializers.CharField(write_only=True)
     class Meta:
@@ -1471,6 +1478,8 @@ class UserSerializer(serializers.ModelSerializer):
             profile.role = role
             profile.save()
         return instance
+    
+# Assigning page access based on their role    
 class AssignPageSerializer(serializers.Serializer):
     role_id = serializers.IntegerField()
     page = serializers.ListField(
