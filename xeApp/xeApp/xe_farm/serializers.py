@@ -1445,6 +1445,8 @@ class EventSerializer(serializers.ModelSerializer):
         fields = '__all__'
 #jobs
 class JobsSerializer(serializers.ModelSerializer):
+    start_date = serializers.DateField(default=timezone.localdate)
+    end_date = serializers.DateField(required = False) 
     class Meta:
         model = Jobs
         fields = '__all__'  
